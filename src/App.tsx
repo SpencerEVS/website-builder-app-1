@@ -359,7 +359,7 @@ const App: React.FC = () => {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingLeft: '20px', paddingRight: '20px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <img 
-              src="/evs-logo.png" 
+              src={process.env.PUBLIC_URL + '/evs-logo.png'} 
               alt="EVS Automation" 
               style={{ 
                 height: '50px', 
