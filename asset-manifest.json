@@ -1,8 +1,8 @@
 {
   "files": {
     "main.css": "/website-builder-app-1/static/css/main.ea3b4762.chunk.css",
-    "main.js": "/website-builder-app-1/static/js/main.b25c462a.chunk.js",
-    "main.js.map": "/website-builder-app-1/static/js/main.b25c462a.chunk.js.map",
+    "main.js": "/website-builder-app-1/static/js/main.dcb21448.chunk.js",
+    "main.js.map": "/website-builder-app-1/static/js/main.dcb21448.chunk.js.map",
     "runtime-main.js": "/website-builder-app-1/static/js/runtime-main.b40cd7fa.js",
     "runtime-main.js.map": "/website-builder-app-1/static/js/runtime-main.b40cd7fa.js.map",
     "static/js/2.9ebc4195.chunk.js": "/website-builder-app-1/static/js/2.9ebc4195.chunk.js",
@@ -15,6 +15,6 @@
     "static/js/runtime-main.b40cd7fa.js",
     "static/js/2.9ebc4195.chunk.js",
     "static/css/main.ea3b4762.chunk.css",
-    "static/js/main.b25c462a.chunk.js"
+    "static/js/main.dcb21448.chunk.js"
   ]
 }
