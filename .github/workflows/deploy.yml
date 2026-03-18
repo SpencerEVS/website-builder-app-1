@@ -15,7 +15,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '18'
+          node-version: '16'
       
       - name: Install dependencies
         run: npm install --legacy-peer-deps
@@ -23,7 +23,6 @@ jobs:
       - name: Build
         run: npx react-scripts build
         env:
-          NODE_OPTIONS: --openssl-legacy-provider
           CI: false
           GENERATE_SOURCEMAP: false
       
