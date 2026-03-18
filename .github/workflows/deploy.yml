@@ -24,6 +24,8 @@ jobs:
         run: npx react-scripts build
         env:
           NODE_OPTIONS: --openssl-legacy-provider
+          CI: false
+          GENERATE_SOURCEMAP: false
       
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
