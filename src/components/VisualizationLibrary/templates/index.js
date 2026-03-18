@@ -6,6 +6,7 @@ import { clockWidgetTemplate } from './clock-widget';
 import { variablesDisplayTemplate } from './variables-display';
 import { landingPageTemplate } from './landing-page';
 import { dashboardTemplate } from './dashboard';
+import { fontManagerTemplate } from './font-manager';
 
 // JavaScript/Code templates
 export const codeTemplates = {
@@ -13,7 +14,8 @@ export const codeTemplates = {
     'data-visualization': dataVisualizationTemplate,
     'interactive-form': interactiveFormTemplate,
     'clock-widget': clockWidgetTemplate,
-    'variables-display': variablesDisplayTemplate
+    'variables-display': variablesDisplayTemplate,
+    'font-manager': fontManagerTemplate
 };
 
 // HTML templates

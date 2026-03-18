@@ -17,17 +17,101 @@ export const generateCode = (
     }
 
     if (format === 'js') {
-        let code = '// Generated JavaScript Code from Website Builder\n\n';
-        
-        windows.forEach((window, index) => {
-            if (window.type === 'javascript' && window.jsCode) {
-                code += `// Window: ${window.title}\n`;
-                code += `(function() {\n`;
-                code += window.jsCode.split('\n').map(line => `    ${line}`).join('\n');
-                code += `\n})();\n\n`;
+        const bgColor = backgroundConfig?.color || '#ffffff';
+        const bgWidth  = backgroundConfig?.width  || 1200;
+        const bgHeight = backgroundConfig?.height || 800;
+
+        const sortedWindows = [...windows].sort((a, b) => (a.layer || 1) - (b.layer || 1));
+
+        // ---- Build the inner HTML for the page container ----
+        let innerHtml = '';
+        innerHtml += '<style>';
+        innerHtml += '.wc{position:absolute;background:transparent;border:none;overflow:visible;font-family:Arial,sans-serif;}';
+        innerHtml += '.wcon{padding:0;overflow:visible;display:flex;flex-direction:column;width:100%;height:100%;}';
+        innerHtml += '</style>';
+
+        sortedWindows.forEach((win, index) => {
+            const x = win.position.x;
+            const y = win.position.y;
+            const z = win.layer || 1;
+            const wrapOpen = `<div class="wc" style="left:${x}px;top:${y}px;width:${win.size.width}px;height:${win.size.height}px;z-index:${z};"><div class="wcon">`;
+            const wrapClose = `</div></div>`;
+
+            if (win.type === 'html') {
+                innerHtml += `${wrapOpen}${win.content || ''}${wrapClose}`;
+            } else if (win.type === 'javascript' && win.jsCode) {
+                innerHtml += `${wrapOpen}<div id="_jsw_${index}" style="height:100%;width:100%;position:relative;overflow:auto;"></div>${wrapClose}`;
+            } else if (win.type === 'visualization') {
+                if (win.content && win.content.startsWith('IMAGE:')) {
+                    const dataUrl = win.content.split(':').slice(2).join(':');
+                    innerHtml += `${wrapOpen}<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;"><img src="${dataUrl}" style="max-width:100%;max-height:100%;object-fit:contain;" /></div>${wrapClose}`;
+                }
             }
         });
 
+        // ---- Generate the output script ----
+        let code = '';
+        code += `// ============================================================\n`;
+        code += `// Generated Page Script — paste into a JS window in the builder\n`;
+        code += `// Renders the full page layout with all windows and variables.\n`;
+        code += `// ============================================================\n\n`;
+        code += `(function() {\n`;
+        code += `    // ---- 1. Build page container ----\n`;
+        code += `    var _page = document.createElement('div');\n`;
+        code += `    _page.style.cssText = 'position:relative;width:${bgWidth}px;height:${bgHeight}px;background:${bgColor};overflow:hidden;';\n`;
+        code += `    _page.innerHTML = ${JSON.stringify(innerHtml)};\n`;
+        code += `    document.body.appendChild(_page);\n\n`;
+
+        const jsWindows = sortedWindows.filter(w => w.type === 'javascript' && w.jsCode);
+        if (jsWindows.length > 0) {
+            code += `    // ---- 2. Execute JavaScript windows ----\n`;
+
+            sortedWindows.forEach((win, index) => {
+                if (win.type !== 'javascript' || !win.jsCode) return;
+
+                code += `\n    // -- JS Window: ${win.title || `Window ${index + 1}`} --\n`;
+                code += `    (function() {\n`;
+                code += `        try {\n`;
+                code += `            var container = document.getElementById('_jsw_${index}');\n`;
+                code += `            if (!container) return;\n\n`;
+                code += `            // Sandboxed document scoped to this window's container\n`;
+                code += `            var _sandboxDoc = {\n`;
+                code += `                createElement: function(t) { return document.createElement(t); },\n`;
+                code += `                getElementById: function(id) { return container.querySelector('#' + id); },\n`;
+                code += `                querySelector: function(s) { return container.querySelector(s); },\n`;
+                code += `                querySelectorAll: function(s) { return container.querySelectorAll(s); },\n`;
+                code += `                body: {\n`;
+                code += `                    appendChild: function(el) { container.appendChild(el); return el; },\n`;
+                code += `                    removeChild: function(el) { if (container.contains(el)) container.removeChild(el); return el; }\n`;
+                code += `                }\n`;
+                code += `            };\n\n`;
+                code += `            // Inherit global and API variables from the builder context\n`;
+                code += `            var _gv = (typeof globalVariables !== 'undefined' ? globalVariables : {});\n`;
+                code += `            var _av = (typeof apiVariables !== 'undefined' ? apiVariables : {});\n\n`;
+                code += `            var _isValidId = function(n) { return /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(n); };\n`;
+                code += `            var _gvNames = Object.keys(_gv).filter(_isValidId);\n`;
+                code += `            var _gvValues = _gvNames.map(function(k) { return _gv[k]; });\n`;
+                code += `            var _avNames = Object.keys(_av).filter(_isValidId);\n`;
+                code += `            var _avValues = _avNames.map(function(k) { return _av[k]; });\n\n`;
+                code += `            var _params = ['document', 'window', 'globalVariables', 'apiVariables'].concat(_gvNames).concat(_avNames);\n`;
+                code += `            var _vals   = [_sandboxDoc, window, _gv, _av].concat(_gvValues).concat(_avValues);\n\n`;
+                code += `            var AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;\n`;
+                code += `            var _fn = new AsyncFunction(..._params, ${JSON.stringify(win.jsCode)});\n`;
+                code += `            var _p  = _fn(..._vals);\n`;
+                code += `            if (_p && typeof _p.catch === 'function') {\n`;
+                code += `                _p.catch(function(e) {\n`;
+                code += `                    container.innerHTML = '<div style="color:red;font-family:monospace;padding:8px;font-size:11px;">Error: ' + e.message + '</div>';\n`;
+                code += `                });\n`;
+                code += `            }\n`;
+                code += `        } catch(e) {\n`;
+                code += `            var _c = document.getElementById('_jsw_${index}');\n`;
+                code += `            if (_c) _c.innerHTML = '<div style="color:red;font-family:monospace;padding:8px;font-size:11px;">Error: ' + e.message + '</div>';\n`;
+                code += `        }\n`;
+                code += `    })();\n`;
+            });
+        }
+
+        code += `\n})();\n`;
         return code;
     }
 
@@ -79,9 +163,28 @@ export const generateCode = (
         window.apiData = {};
         window.globalVariables = ${JSON.stringify(dataConnections?.globalVariables || {})};
         
+        // Helper: substitute {{varName}} placeholders with actual global variable values
+        window.substitutePlaceholders = function(str) {
+            if (typeof str !== 'string') return str;
+            return str.replace(/\{\{(\w+)\}\}/g, function(match, varName) {
+                var val = window.globalVariables[varName];
+                return (val !== undefined && val !== null) ? String(val) : match;
+            });
+        };
+        window.substituteInObject = function(obj) {
+            if (typeof obj === 'string') return window.substitutePlaceholders(obj);
+            if (Array.isArray(obj)) return obj.map(window.substituteInObject);
+            if (obj && typeof obj === 'object') {
+                var result = {};
+                Object.keys(obj).forEach(function(k) { result[k] = window.substituteInObject(obj[k]); });
+                return result;
+            }
+            return obj;
+        };
+        
         // Initialize API variables object (will be populated by API calls)
         window.apiVariables = {};
-        ${dataConnections?.apiConnections.map(api => 
+        ${(dataConnections?.apiConnections || []).map(api => 
             api.variables.map(variable => 
                 `window.apiVariables['${api.name}_${variable.name}'] = null; // Will be populated by API call`
             ).join('\n        ')
@@ -91,13 +194,13 @@ export const generateCode = (
         Object.assign(window, window.globalVariables);
         
         // Make API variables available directly by variable name (initialized as null until API calls populate them)
-        ${dataConnections?.apiConnections.map(api =>
+        ${(dataConnections?.apiConnections || []).map(api =>
             api.variables.map(variable =>
                 `window['${variable.name}'] = null; // Will be populated by API call`
             ).join('\n        ')
         ).join('\n        ')}
         
-        ${dataConnections?.apiConnections.filter(api => api.enabled).map(api => `
+        ${(dataConnections?.apiConnections || []).filter(api => api.enabled).map(api => `
         // API Connection: ${api.name}
         let ${api.name.replace(/[^a-zA-Z0-9]/g, '')}Timer = null;
         let ${api.name.replace(/[^a-zA-Z0-9]/g, '')}LastTriggerState = null;
@@ -120,9 +223,19 @@ export const generateCode = (
                 let url = '${api.url}';
                 const params = Object.assign(${JSON.stringify(api.params)}, finalArgs);
                 
+                // Substitute {{variableName}} placeholders in headers with actual global variable values
+                const rawHeaders = ${JSON.stringify(api.headers)};
+                const substitutedHeaders = {};
+                Object.keys(rawHeaders).forEach(function(key) {
+                    substitutedHeaders[key] = String(rawHeaders[key]).replace(/\{\{(\w+)\}\}/g, function(match, varName) {
+                        const val = (window.globalVariables && window.globalVariables[varName] !== undefined) ? window.globalVariables[varName] : window[varName];
+                        return (val !== undefined && val !== null) ? String(val) : match;
+                    });
+                });
+                
                 let requestOptions = {
                     method: '${api.method}',
-                    headers: ${JSON.stringify(api.headers)}
+                    headers: substitutedHeaders
                 };
                 
                 if ('${api.method}' === 'GET') {
@@ -132,9 +245,10 @@ export const generateCode = (
                     // For POST/PUT/PATCH, build body with additional config merged in
                     let requestBody = Object.assign({}, params);
                     ${api.additionalConfig ? `
-                    // Merge additional JSON configuration into body
+                    // Merge additional JSON configuration into body (with placeholder substitution)
                     try {
-                        const additionalConfig = ${api.additionalConfig};
+                        var rawAdditionalConfig = ${api.additionalConfig};
+                        var additionalConfig = window.substituteInObject ? window.substituteInObject(rawAdditionalConfig) : rawAdditionalConfig;
                         if (additionalConfig && typeof additionalConfig === 'object') {
                             // Merge additional config directly into request body
                             Object.assign(requestBody, additionalConfig);
@@ -174,7 +288,9 @@ export const generateCode = (
         };
         
         // Set up trigger for ${api.name}
-        ${api.trigger.type === 'cyclic' ? `
+        ${api.trigger.type === 'manual' ? `
+        // Manual trigger - call window.fetch${api.name.replace(/[^a-zA-Z0-9]/g, '')}() from JS code to fetch on demand
+        ` : api.trigger.type === 'cyclic' ? `
         // Cyclic trigger - every ${api.trigger.interval}ms
         ${api.name.replace(/[^a-zA-Z0-9]/g, '')}Timer = setInterval(() => {
             window.fetch${api.name.replace(/[^a-zA-Z0-9]/g, '')}();
@@ -208,7 +324,7 @@ export const generateCode = (
         
         // Cleanup function
         window.stopApiConnections = function() {
-            ${dataConnections?.apiConnections.filter(api => api.enabled).map(api => `
+            ${(dataConnections?.apiConnections || []).filter(api => api.enabled).map(api => `
             if (${api.name.replace(/[^a-zA-Z0-9]/g, '')}Timer) {
                 clearInterval(${api.name.replace(/[^a-zA-Z0-9]/g, '')}Timer);
             }`).join('')}
@@ -216,19 +332,23 @@ export const generateCode = (
         
         // Start initial API calls for cyclic triggers and populate all variables on load
         setTimeout(() => {
-            ${dataConnections?.apiConnections.filter(api => api.enabled).map(api => `
+            ${(dataConnections?.apiConnections || []).filter(api => api.enabled).map(api => `
             window.fetch${api.name.replace(/[^a-zA-Z0-9]/g, '')}();`).join('')}
         }, 1000);
     </script>
     <div class="website-container">
 `;
 
-    windows.forEach((window, index) => {
+    // Sort windows by layer so lower layers render first (higher layers appear on top)
+    const sortedWindows = [...windows].sort((a, b) => (a.layer || 1) - (b.layer || 1));
+
+    sortedWindows.forEach((window, index) => {
         // Convert canvas positions to viewport positions
         const exportX = window.position.x;
         const exportY = window.position.y;
+        const zIndex = window.layer || 1;
         
-        htmlCode += `        <div class="window-container" style="left: ${exportX}px; top: ${exportY}px; width: ${window.size.width}px; height: ${window.size.height}px;">
+        htmlCode += `        <div class="window-container" style="left: ${exportX}px; top: ${exportY}px; width: ${window.size.width}px; height: ${window.size.height}px; z-index: ${zIndex};">
             <div class="window-content">
 `;
 
@@ -340,8 +460,34 @@ export const generateCode = (
                         });
                         
                         // Execute the code with proxied sandboxed environment
-                        const func = new Function('document', 'window', ${JSON.stringify(window.jsCode)});
-                        func(sandboxDocument, sandboxProxy);
+                        // Build parameter list to match the builder sandbox (globalVariables, apiVariables, + each var by name)
+                        var _globalVars = window.globalVariables || {};
+                        var _apiVars = window.apiVariables || {};
+                        var _isValidId = function(n) { return /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(n); };
+                        var _globalVarNames = Object.keys(_globalVars).filter(_isValidId);
+                        var _globalVarValues = _globalVarNames.map(function(k) { return _globalVars[k]; });
+                        var _apiVarNames = Object.keys(_apiVars).filter(_isValidId);
+                        var _apiVarValues = _apiVarNames.map(function(k) { return _apiVars[k]; });
+                        // Build apiConnections map so user code can: await apiConnections['Name']()
+                        var _apiConnectionsMap = {};
+                        ${JSON.stringify((dataConnections?.apiConnections || []).filter((a: any) => a.enabled).map((a: any) => a.name))}.forEach(function(name) {
+                            var fnName = 'fetch' + name.replace(/[^a-zA-Z0-9]/g, '');
+                            if (typeof window[fnName] === 'function') {
+                                _apiConnectionsMap[name] = function() { return window[fnName](); };
+                            }
+                        });
+                        var _allParamNames = ['document', 'window', 'globalVariables', 'apiVariables', 'apiConnections'].concat(_globalVarNames).concat(_apiVarNames);
+                        var _allParamValues = [sandboxDocument, sandboxProxy, _globalVars, _apiVars, _apiConnectionsMap].concat(_globalVarValues).concat(_apiVarValues);
+                        // Use AsyncFunction so await works in user code
+                        var AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+                        const func = new AsyncFunction(..._allParamNames, ${JSON.stringify(window.jsCode)});
+                        var _p = func(..._allParamValues);
+                        if (_p && typeof _p.catch === 'function') {
+                            _p.catch(function(e) {
+                                var c = document.getElementById('js-container-${index}');
+                                if (c) c.innerHTML = '<div style="color:red;font-family:monospace;padding:10px;font-size:12px;">Error: ' + e.message + '</div>';
+                            });
+                        }
                         
                     } catch (error) {
                         document.getElementById('js-container-${index}').innerHTML = 

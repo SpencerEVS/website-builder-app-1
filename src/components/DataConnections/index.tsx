@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { ApiConnection, ApiVariable, ApiArgument, ApiTrigger, DataConnection } from '../../types';
 
 // API Templates for common use cases - Full Featured Version
@@ -152,6 +152,13 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
     const [responseContents, setResponseContents] = useState<Record<string, any>>({});
     const [showResponsePanel, setShowResponsePanel] = useState<Record<string, boolean>>({});
 
+    // Ref that always holds the very latest globalVariables — updated immediately in syncApiVariablesToGlobal
+    // so that subsequent test calls within the same session see freshly-extracted values (e.g. token)
+    // without waiting for the parent re-render cycle to complete.
+    const liveGlobalVarsRef = useRef<Record<string, any>>(dataConnections.globalVariables);
+    // Keep ref in sync whenever the prop changes
+    liveGlobalVarsRef.current = dataConnections.globalVariables;
+
     // Common header options
     const commonHeaders = [
         { name: 'Accept', value: 'application/json', description: 'Specify accepted response format' },
@@ -279,7 +286,26 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
         const processObject = (obj: any, currentPath: string) => {
             if (obj === null || obj === undefined) return;
             
-            if (typeof obj === 'object' && !Array.isArray(obj)) {
+            if (Array.isArray(obj)) {
+                // Top-level or nested array: process each element with numeric index path
+                obj.forEach((item, index) => {
+                    const itemPath = currentPath ? `${currentPath}.${index}` : String(index);
+                    if (typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean') {
+                        variables.push({
+                            id: `var-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                            name: `item_${index}`.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase(),
+                            jsonPath: itemPath,
+                            type: typeof item === 'number' ? 'number' : typeof item === 'boolean' ? 'boolean' : 'string',
+                            description: `Auto-extracted from ${itemPath} (${typeof item})`
+                        });
+                    } else if (typeof item === 'object' && item !== null && !Array.isArray(item)) {
+                        processObject(item, itemPath);
+                    }
+                });
+                return;
+            }
+
+            if (typeof obj === 'object') {
                 Object.keys(obj).forEach(key => {
                     const newPath = currentPath ? `${currentPath}.${key}` : key;
                     const value = obj[key];
@@ -308,18 +334,6 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                                 type: 'number',
                                 description: `Count of items in ${newPath}`
                             });
-                            
-                            // If first array item is primitive, create variable for accessing first item
-                            const firstItem = value[0];
-                            if (typeof firstItem === 'string' || typeof firstItem === 'number' || typeof firstItem === 'boolean') {
-                                variables.push({
-                                    id: `var-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-                                    name: `${key}_first`.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase(),
-                                    jsonPath: `${newPath}[0]`,
-                                    type: typeof firstItem === 'number' ? 'number' : typeof firstItem === 'boolean' ? 'boolean' : 'string',
-                                    description: `First item from ${newPath}`
-                                });
-                            }
                         }
                     }
                 });
@@ -355,6 +369,62 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
         alert(`Added ${newVariables.length} variables from response data. ${extractedVars.length - newVariables.length} variables were skipped because names already exist.`);
     };
 
+    // Helper function to extract value from response using jsonPath
+    const extractValueFromResponse = (responseData: any, jsonPath: string): any => {
+        if (!jsonPath) return responseData;
+        const pathParts = jsonPath.split('.');
+        return pathParts.reduce((obj: any, key: string) => obj?.[key], responseData);
+    };
+
+    // Helper function to substitute placeholders like {{variableName}} with actual values
+    const substitutePlaceholders = (value: string, variables: Record<string, any>): string => {
+        if (typeof value !== 'string') return value;
+        return value.replace(/\{\{(\w+)\}\}/g, (match, varName) => {
+            const varValue = variables[varName];
+            return varValue !== undefined && varValue !== null ? String(varValue) : match;
+        });
+    };
+
+    // Helper function to sync extracted API variables to global variables.
+    // Accepts an optional baseState so the caller can pass a state object that already
+    // contains other pending updates (e.g. sampleResponse), preventing a stale-closure
+    // overwrite when multiple onDataConnectionsChange calls are batched together.
+    const syncApiVariablesToGlobal = (connectionId: string, responseData: any, baseState?: DataConnection) => {
+        const state = baseState || dataConnections;
+        const connection = state.apiConnections.find(conn => conn.id === connectionId);
+        if (!connection || !connection.variables.length) return;
+
+        const updatedGlobalVariables = { ...liveGlobalVarsRef.current };
+        let hasChanges = false;
+
+        connection.variables.forEach(variable => {
+            // Extract the value using jsonPath
+            const extractedValue = extractValueFromResponse(responseData, variable.jsonPath);
+            
+            // Always add extracted values to global variables
+            // (auto-creates if doesn't exist, or updates if it does)
+            updatedGlobalVariables[variable.name] = extractedValue;
+            hasChanges = true;
+            console.log(`Added/updated global variable '${variable.name}' from API response:`, extractedValue);
+        });
+
+        // Update data connections if there were changes
+        if (hasChanges) {
+            // Update the live ref immediately so the next test call can use the new values
+            // even before the parent re-render has delivered the new prop.
+            liveGlobalVarsRef.current = updatedGlobalVariables;
+            onDataConnectionsChange({
+                ...state,
+                globalVariables: updatedGlobalVariables
+            });
+        } else {
+            // No variable changes but we still need to persist baseState (e.g. sampleResponse)
+            if (baseState) {
+                onDataConnectionsChange(baseState);
+            }
+        }
+    };
+
     const handleTestConnection = async (connectionId: string) => {
         const connection = dataConnections.apiConnections.find(conn => conn.id === connectionId);
         if (!connection) return;
@@ -365,6 +435,8 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
         let url = connection.url;
         let requestBody: any = null;
         const urlParams = new URLSearchParams();
+        // Declared outside try so catch block can reference it
+        const substitutedHeaders: Record<string, string> = {};
 
         try {
             // Add URL parameters
@@ -379,45 +451,44 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                         urlParams.append(arg.name, arg.value);
                     } else if (arg.type === 'variable') {
                         // For testing, use placeholder values for variables
-                        const variableValue = dataConnections.globalVariables[arg.value] || `[${arg.value}]`;
+                        const variableValue = liveGlobalVarsRef.current[arg.value] || `[${arg.value}]`;
                         urlParams.append(arg.name, String(variableValue));
                     }
                 });
             } else {
-                // For POST/PUT, create JSON body with arguments and additional config
-                const requestPayload: any = {};
-                
-                // Add arguments directly to the root payload
+                // For POST/PUT: build body from additionalConfig and/or arguments.
+                // - Array additionalConfig → send raw (arrays can't merge with named args)
+                // - Object additionalConfig → merge arguments into it (backward-compatible)
+                // - No additionalConfig → build body purely from arguments
+                const argPayload: any = {};
                 connection.arguments.forEach(arg => {
                     if (arg.type === 'static') {
-                        requestPayload[arg.name] = arg.value;
+                        argPayload[arg.name] = arg.value;
                     } else if (arg.type === 'variable') {
-                        requestPayload[arg.name] = dataConnections.globalVariables[arg.value] || `[${arg.value}]`;
+                        argPayload[arg.name] = liveGlobalVarsRef.current[arg.value] || `[${arg.value}]`;
                     }
                 });
-                
-                // Add additional configuration, merging with existing data
+
                 if (connection.additionalConfig) {
+                    const substitutedBody = substitutePlaceholders(connection.additionalConfig, liveGlobalVarsRef.current);
                     try {
-                        const additionalData = JSON.parse(connection.additionalConfig);
-                        // Merge additional config with existing payload
-                        Object.keys(additionalData).forEach(key => {
-                            if (key === 'body' && typeof additionalData[key] === 'object') {
-                                // If additional config has a 'body' object, merge it with existing arguments
-                                Object.assign(requestPayload, additionalData[key]);
-                            } else {
-                                // For other properties, assign directly
-                                requestPayload[key] = additionalData[key];
-                            }
-                        });
-                    } catch (error) {
-                        console.warn('Invalid JSON in additional configuration:', error);
+                        const parsed = JSON.parse(substitutedBody);
+                        if (Array.isArray(parsed)) {
+                            // Array body — use as-is; named arguments are intentionally ignored
+                            requestBody = substitutedBody;
+                        } else {
+                            // Object body — merge named arguments in (args override additionalConfig keys)
+                            requestBody = JSON.stringify({ ...parsed, ...argPayload });
+                        }
+                    } catch {
+                        // Not valid JSON — send raw string as-is
+                        requestBody = substitutedBody;
                     }
-                }
-                
-                // Only set requestBody if there's actual content
-                if (Object.keys(requestPayload).length > 0) {
-                    requestBody = JSON.stringify(requestPayload);
+                } else {
+                    // No additionalConfig — build body purely from arguments
+                    if (Object.keys(argPayload).length > 0) {
+                        requestBody = JSON.stringify(argPayload);
+                    }
                 }
             }
 
@@ -426,12 +497,20 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                 url += (url.includes('?') ? '&' : '?') + urlParams.toString();
             }
 
+            // Substitute placeholders in headers with actual global variable values
+            // Use liveGlobalVarsRef.current so we pick up any values extracted by a
+            // preceding test in the same session (e.g. login token) even if the parent
+            // hasn't re-rendered yet.
+            Object.entries(connection.headers).forEach(([key, value]) => {
+                substitutedHeaders[key] = substitutePlaceholders(String(value), liveGlobalVarsRef.current);
+            });
+
             const response = await fetch(url, {
                 method: connection.method,
                 headers: {
-                    ...connection.headers,
-                    // Only add JSON content-type if not already specified and body is JSON
-                    ...(requestBody && !connection.headers['Content-Type'] && typeof connection.body !== 'string' && { 'Content-Type': 'application/json' })
+                    ...substitutedHeaders,
+                    // Auto-add Content-Type if not already specified and we have a body
+                    ...(requestBody && !substitutedHeaders['Content-Type'] && { 'Content-Type': 'application/json' })
                 },
                 body: requestBody
             });
@@ -446,13 +525,15 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
             }
 
             // Create detailed response with request/response info for display
+            const parsedBody = requestBody
+                ? (() => { try { return JSON.parse(requestBody); } catch { return requestBody; } })()
+                : null;
             const detailedResponse = {
                 requestDetails: {
                     url: url,
                     method: connection.method,
-                    headers: connection.headers,
-                    body: requestBody ? (typeof requestBody === 'string' ? JSON.parse(requestBody) : requestBody) : null,
-                    additionalConfig: connection.additionalConfig ? JSON.parse(connection.additionalConfig) : null
+                    headers: substitutedHeaders,
+                    body: parsedBody
                 },
                 responseDetails: {
                     status: response.status,
@@ -482,8 +563,18 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
             };
             
             const formattedResponse = JSON.stringify(detailedResponse, null, 2);
-            handleUpdateConnection(connectionId, { sampleResponse: formattedResponse });
-            
+
+            // Build the updated state with the new sampleResponse before dispatching.
+            // This avoids a stale-closure race: if we called handleUpdateConnection first
+            // and then syncApiVariablesToGlobal, the second call would spread from the
+            // OLD dataConnections (without sampleResponse) and overwrite the first update.
+            const stateWithSample: DataConnection = {
+                ...dataConnections,
+                apiConnections: dataConnections.apiConnections.map(conn =>
+                    conn.id === connectionId ? { ...conn, sampleResponse: formattedResponse } : conn
+                )
+            };
+
             // Store clean response data for the response panel
             setResponseContents(prev => ({
                 ...prev,
@@ -500,6 +591,12 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                 }
             }));
 
+            // Sync extracted values to global variables (passes stateWithSample as base
+            // so both sampleResponse and globalVariables land in a single state update).
+            // syncApiVariablesToGlobal will call onDataConnectionsChange with stateWithSample
+            // merged with the updated globalVariables, or just stateWithSample if no vars changed.
+            syncApiVariablesToGlobal(connectionId, responseData, stateWithSample);
+
         } catch (error) {
             console.error('API Test Error:', error);
             
@@ -513,8 +610,10 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                 requestDetails: {
                     url: url || connection.url,
                     method: connection.method,
-                    headers: connection.headers,
-                    body: requestBody ? (typeof requestBody === 'string' ? JSON.parse(requestBody) : requestBody) : null
+                    headers: Object.keys(substitutedHeaders).length > 0 ? substitutedHeaders : connection.headers,
+                    body: requestBody
+                        ? (() => { try { return JSON.parse(requestBody); } catch { return requestBody; } })()
+                        : null
                 },
                 responseDetails: {
                     status: 'No Response',
@@ -1030,9 +1129,12 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                             onChange={(e) => {
                                 // @ts-ignore
                                 const triggerType = e.target.value;
-                                const newTrigger: ApiTrigger = triggerType === 'cyclic' 
-                                    ? { type: 'cyclic', interval: 5000 }
-                                    : { type: 'conditional', condition: { variable: '', operator: '==', value: '' } };
+                                const newTrigger: ApiTrigger =
+                                    triggerType === 'cyclic'
+                                        ? { type: 'cyclic', interval: 5000 }
+                                        : triggerType === 'manual'
+                                        ? { type: 'manual' }
+                                        : { type: 'conditional', condition: { variable: '', operator: '==', value: '' } };
                                 handleUpdateConnection(activeConnectionData.id, { trigger: newTrigger });
                             }}
                             style={{
@@ -1045,7 +1147,18 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                         >
                             <option value="cyclic">Cyclic (Time-based)</option>
                             <option value="conditional">Conditional (Variable-based)</option>
+                            <option value="manual">Manual (await only)</option>
                         </select>
+
+                        {/* Manual Trigger Description */}
+                        {activeConnectionData.trigger.type === 'manual' && (
+                            <div style={{ marginTop: '8px', padding: '8px', backgroundColor: '#f8f9fa', borderRadius: '3px', border: '1px solid #dee2e6', fontSize: '11px', color: '#495057' }}>
+                                ⏸️ This connection will <strong>not</strong> run automatically. Call it from JS code using:<br />
+                                <code style={{ display: 'block', marginTop: '4px', background: '#e9ecef', padding: '4px 6px', borderRadius: '2px', fontFamily: 'monospace' }}>
+                                    {`const data = await apiConnections['${activeConnectionData.name}']();`}
+                                </code>
+                            </div>
+                        )}
 
                         {/* Cyclic Trigger Settings */}
                         {activeConnectionData.trigger.type === 'cyclic' && (
@@ -1450,7 +1563,7 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                                 Additional JSON Body:
                                 <span style={{ fontWeight: 'normal', fontSize: '10px', color: '#666', marginLeft: '4px' }}>
                                     {activeConnectionData.method === 'POST' || activeConnectionData.method === 'PUT' ? 
-                                        '(merged into request body)' : 
+                                        '(object: merged with args  |  array: sent as-is)' : 
                                         '(for POST/PUT requests)'}
                                 </span>
                             </label>
@@ -1504,7 +1617,7 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                                 />
                                 <div style={{ fontSize: '10px', color: '#6c757d', marginTop: '4px' }}>
                                     {(activeConnectionData.method === 'POST' || activeConnectionData.method === 'PUT') ? (
-                                        <>💡 Merged into request body. For batch operations, use: <code style={{ background: '#f0f0f0', padding: '2px 4px' }}>{"{"}"variables": ["var1", "var2"]{"}"}</code></>
+                                        <>💡 JSON <strong>object</strong> is merged with argument fields below. JSON <strong>array</strong> (e.g. batch) is sent as-is and argument fields are ignored.</>
                                     ) : (
                                         'This JSON will be merged with the request. Use for complex configurations.'
                                     )}
@@ -1842,7 +1955,7 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
 
                     {/* Variables */}
                     <div style={{ marginBottom: '15px' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
                             <label style={{ fontSize: '12px', fontWeight: 'bold' }}>Variables:</label>
                             <div style={{ display: 'flex', gap: '6px' }}>
                                 {responseContents[activeConnectionData.id] && (
@@ -1876,6 +1989,13 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                                     + Add Variable
                                 </button>
                             </div>
+                        </div>
+                        {/* Path syntax hint */}
+                        <div style={{ fontSize: '10px', color: '#6c757d', marginBottom: '8px', lineHeight: '1.5' }}>
+                            <strong>Path syntax:</strong>&nbsp;
+                            Object: <code style={{ background: '#f0f0f0', padding: '1px 3px', borderRadius: '2px' }}>data.value</code>&nbsp;&nbsp;
+                            Array item: <code style={{ background: '#f0f0f0', padding: '1px 3px', borderRadius: '2px' }}>0.result</code> <span style={{ color: '#999' }}>(index 0, field "result")</span>&nbsp;&nbsp;
+                            Nested: <code style={{ background: '#f0f0f0', padding: '1px 3px', borderRadius: '2px' }}>items.0.id</code>
                         </div>
 
                         {activeConnectionData.variables.map(variable => (
@@ -1934,7 +2054,7 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                                 </div>
                                 <input
                                     type="text"
-                                    placeholder="JSON path (e.g., data.name or items[0])"
+                                    placeholder="JSON path (e.g., data.name  or  0.result  or  1.result)"
                                     value={variable.jsonPath}
                                     onChange={(e) => handleUpdateVariable(activeConnectionData.id, variable.id, { jsonPath: e.target.value })}
                                     style={{

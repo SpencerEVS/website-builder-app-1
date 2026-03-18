@@ -1,14 +1,16 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { WindowPanel as WindowPanelType, DataConnection } from '../../types';
 
 interface WindowPanelProps {
     window: WindowPanelType;
     onUpdate: (id: string, updates: Partial<WindowPanelType>) => void;
     onDelete: (id: string) => void;
-    onSelect: (id: string) => void;
+    onSelect: (id: string, event?: React.MouseEvent) => void;
     isSelected: boolean;
+    isPrimary?: boolean;
     onMouseDown?: (e: React.MouseEvent, windowId: string, type: 'drag' | 'resize', direction?: string) => void;
     dataConnections?: DataConnection;
+    onDataConnectionsChange?: (dataConnections: DataConnection) => void;
     onMoveWindowLayer?: (windowId: string, direction: 'up' | 'down') => void;
     maxLayer?: number;
     minLayer?: number;
@@ -20,17 +22,19 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
     onDelete, 
     onSelect,
     isSelected,
+    isPrimary = false,
     onMouseDown,
     dataConnections = { apiConnections: [], globalVariables: {} },
+    onDataConnectionsChange,
     onMoveWindowLayer,
     maxLayer = 3,
     minLayer = 1
 }) => {
     const [output, setOutput] = useState<string>('');
     const [error, setError] = useState<string>('');
-    const [showCodeEditor, setShowCodeEditor] = useState<boolean>(true);
+    const [showCodeEditor, setShowCodeEditor] = useState<boolean>(window.type !== 'javascript');
     const [showHtmlEditor, setShowHtmlEditor] = useState<boolean>(false);
-    const [hasExecuted, setHasExecuted] = useState<boolean>(false);
+    const [hasExecuted, setHasExecuted] = useState<boolean>(window.type === 'javascript');
     const [isHovered, setIsHovered] = useState<boolean>(false);
     const [headerFocused, setHeaderFocused] = useState<boolean>(false);
     const [showEditForm, setShowEditForm] = useState<boolean>(false);
@@ -39,6 +43,19 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
     const outputRef = useRef<HTMLDivElement>(null);
     const executionRef = useRef<HTMLDivElement>(null);
     const apiPollingRef = useRef<ReturnType<typeof setInterval>[]>([]);
+    // Tracks whether this component instance is still mounted.
+    // All async callbacks (Promise.then, setTimeout inside executeJavaScript) check this
+    // before writing to DOM or calling onDataConnectionsChange, so that a page switch
+    // can't push stale state into the app or write to a detached DOM node.
+    const isMountedRef = useRef<boolean>(true);
+    const [isEditorFullscreen, setIsEditorFullscreen] = useState<boolean>(false);
+    const [isCodeEditMode, setIsCodeEditMode] = useState<boolean>(false);
+    const gfWin: any = globalThis;
+    const runtimeFonts = gfWin.globalFonts || {};
+    const fontFaceCSS = Object.keys(runtimeFonts)
+        .filter((n: string) => runtimeFonts[n] && typeof runtimeFonts[n] === 'string' && String(runtimeFonts[n]).startsWith('data:'))
+        .map((n: string) => `@font-face { font-family: "${n}"; src: url("${runtimeFonts[n]}"); }`)
+        .join('\n');
 
     const saveAsTemplate = async () => {
         const isVisualization = window.type === 'visualization';
@@ -160,20 +177,49 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
         setShowEditForm(false);
     };
 
-    const executeJavaScript = async () => {
+    // Auto-execute JavaScript code when the window is first mounted or its identity changes.
+    // Intentionally does NOT include window.jsCode in deps — code edits should not auto-run;
+    // the user must press the Run button explicitly after editing.
+    useEffect(() => {
+        isMountedRef.current = true;
+        if (window.type === 'javascript' && window.jsCode) {
+            // Delay execution to ensure DOM is ready
+            const timer = setTimeout(() => {
+                executeJavaScript();
+            }, 150);
+            return () => {
+                clearTimeout(timer);
+                // Clear all polling intervals so old-page intervals don't keep firing
+                apiPollingRef.current.forEach(id => clearInterval(id));
+                apiPollingRef.current = [];
+                isMountedRef.current = false;
+            };
+        }
+        return () => {
+            apiPollingRef.current.forEach(id => clearInterval(id));
+            apiPollingRef.current = [];
+            isMountedRef.current = false;
+        };
+    }, [window.id, window.type]);
+
+    const executeJavaScript = () => {
         if (!window.jsCode) return;
 
         setError('');
         setOutput('');
         setShowCodeEditor(false);  // Hide code editor when running
         setHasExecuted(true);      // Mark as executed
+        setIsCodeEditMode(false);  // Lock edit mode after running
 
         // Clear any previous cyclic polling intervals
         apiPollingRef.current.forEach(id => clearInterval(id));
         apiPollingRef.current = [];
         
+        // Store original console.log before execution
+        const originalConsoleLog = console.log;
+        
         // Use setTimeout to ensure DOM has updated after state change
-        setTimeout(async () => {
+        setTimeout(() => {
             try {
                 // Get the output container for this specific window
                 const outputContainer = executionRef.current;
@@ -181,12 +227,14 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                     console.error('Output container not found');
                     return;
                 }
+                // Bail if the component unmounted between the 150ms outer timer and
+                // this inner callback (e.g. the user switched pages very quickly).
+                if (!isMountedRef.current) return;
 
                 // Clear previous content
                 outputContainer.innerHTML = '';
                 
-                // Create a sandbox for code execution
-                const originalConsoleLog = console.log;
+                // Create logs array for console interception
                 const logs: string[] = [];
                 
                 console.log = (...args) => {
@@ -228,6 +276,16 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                 // Prepare API variables for sandbox - fetch real data from APIs
                 const apiVariables: Record<string, any> = {};
                 const directApiVariables: Record<string, any> = {};
+                const globalVariableUpdates: Record<string, any> = {}; // Track all global variable updates
+
+                // Helper function to substitute placeholders like {{variableName}} with actual values
+                const substitutePlaceholders = (value: any, variables: Record<string, any>): any => {
+                    if (typeof value !== 'string') return value;
+                    return value.replace(/\{\{(\w+)\}\}/g, (match, varName) => {
+                        const varValue = variables[varName];
+                        return varValue !== undefined && varValue !== null ? String(varValue) : match;
+                    });
+                };
                 
                 // Function to fetch data from an API connection
                 const fetchApiData = async (connection: any) => {
@@ -248,9 +306,15 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                         let url = connection.url;
                         const params = { ...connection.params, ...apiArgs };
                         
+                        // Substitute placeholders in headers with actual global variable values
+                        const substitutedHeaders: Record<string, string> = {};
+                        Object.entries(connection.headers || {}).forEach(([key, value]) => {
+                            substitutedHeaders[key] = substitutePlaceholders(String(value), dataConnections.globalVariables);
+                        });
+                        
                         let requestOptions: RequestInit = {
                             method: connection.method,
-                            headers: connection.headers || {}
+                            headers: substitutedHeaders
                         };
                         
                         if (connection.method === 'GET') {
@@ -260,7 +324,11 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                             // Start with body from connection config (e.g. batch read variable list)
                             let bodyObj: Record<string, any> = {};
                             if (connection.body) {
-                                try { bodyObj = JSON.parse(connection.body); } catch (e) {}
+                                try { 
+                                    // Substitute placeholders in body string before parsing
+                                    const substitutedBody = substitutePlaceholders(connection.body, dataConnections.globalVariables);
+                                    bodyObj = JSON.parse(substitutedBody); 
+                                } catch (e) {}
                             }
                             // Merge in any runtime params/arguments on top
                             requestOptions.body = JSON.stringify({ ...bodyObj, ...params });
@@ -289,6 +357,9 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                                 const key = `${connection.name}_${variable.name}`;
                                 apiVariables[key] = variableValue;
                                 directApiVariables[variable.name] = variableValue;
+                                
+                                // Always add to global variables (auto-creates if doesn't exist)
+                                globalVariableUpdates[variable.name] = variableValue;
                             } catch (e) {
                                 console.warn(`Could not extract variable ${variable.name}:`, e);
                                 const key = `${connection.name}_${variable.name}`;
@@ -310,16 +381,35 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                     }
                 };
                 
-                // Fetch data from all enabled API connections
-                const apiPromises = dataConnections.apiConnections
-                    .filter((connection: any) => connection.enabled)
+                // Kick off initial API fetches immediately (fire-and-forget).
+                // We do NOT block user code on the network round-trip — the window
+                // renders at once and the polling intervals keep data fresh.
+                // apiVariables / directApiVariables / globalVariableUpdates are plain
+                // objects that fetchApiData fills by reference as each fetch resolves.
+                const enabledConnections = dataConnections.apiConnections
+                    .filter((connection: any) => connection.enabled);
+                const apiPromises = enabledConnections
                     .map((connection: any) => fetchApiData(connection));
+
+                // When the initial batch of fetches finishes, push extracted values
+                // back to React state so other parts of the UI see them.
+                // Guard: if the component unmounted while fetches were in flight, bail.
+                if (apiPromises.length > 0) {
+                    Promise.all(apiPromises).then(() => {
+                        if (!isMountedRef.current) return;
+                        if (Object.keys(globalVariableUpdates).length > 0 && onDataConnectionsChange) {
+                            const updatedGlobalVariables = { ...dataConnections.globalVariables, ...globalVariableUpdates };
+                            onDataConnectionsChange({
+                                ...dataConnections,
+                                globalVariables: updatedGlobalVariables
+                            });
+                        }
+                    });
+                }
+
+                // ── User code & polling run immediately, without waiting for APIs ──
+                {
                 
-                // Wait for all API calls to complete before executing user code
-                await Promise.all(apiPromises);
-
-
-
                 // Bridge to the real browser window to allow navigation functions
                 // @ts-ignore
                 const realWin = document.defaultView || window;
@@ -353,7 +443,7 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                 }
 
                 // Create a sandboxed window object
-                const sandboxWindow = {
+                const sandboxWindow: Record<string, any> = {
                     alert: (message: string) => {
                         const alertDiv = document.createElement('div');
                         alertDiv.style.cssText = 'background: #fff3cd; border: 1px solid #ffeaa7; padding: 8px; margin: 5px 0; border-radius: 4px; color: #856404;';
@@ -411,23 +501,101 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                     });
                 } catch (e) {}
 
+                // Build apiConnections map so user code can call:
+                //   const data = await apiConnections['MyConnection']();
+                const apiConnectionsMap: Record<string, () => Promise<any>> = {};
+                dataConnections.apiConnections
+                    .filter((c: any) => c.enabled)
+                    .forEach((c: any) => {
+                        apiConnectionsMap[c.name] = () => fetchApiData(c);
+                    });
+                // Also expose on sandboxWindow so window.apiConnections works too
+                sandboxWindow['apiConnections'] = apiConnectionsMap;
+
                 // Execute the code with sandboxed environment
-                // Create parameter names and values for global variables and API variables
-                const globalVarNames = Object.keys(dataConnections.globalVariables);  
-                const globalVarValues = Object.values(dataConnections.globalVariables);
-                const apiVarNames = Object.keys(directApiVariables);
-                const apiVarValues = Object.values(directApiVariables);
+                // Only pass variables whose names are valid JS identifiers as named params;
+                // others are still accessible via window.globalVariables / globalVariables.
+                const isValidIdentifier = (n: string) => /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(n);
+                const globalVarEntries = Object.entries(dataConnections.globalVariables).filter(([k]) => isValidIdentifier(k));
+                const globalVarNames = globalVarEntries.map(([k]) => k);
+                const globalVarValues = globalVarEntries.map(([, v]) => v);
+                const apiVarEntries = Object.entries(directApiVariables).filter(([k]) => isValidIdentifier(k));
+                const apiVarNames = apiVarEntries.map(([k]) => k);
+                const apiVarValues = apiVarEntries.map(([, v]) => v);
                 
-                const allParamNames = ['document', 'window', 'globalVariables', 'apiVariables', ...globalVarNames, ...apiVarNames];
-                const allParamValues = [sandboxDocument, sandboxWindow, dataConnections.globalVariables, directApiVariables, ...globalVarValues, ...apiVarValues];
+                const allParamNames = ['document', 'window', 'process', 'globalVariables', 'apiVariables', 'apiConnections', ...globalVarNames, ...apiVarNames];
+                const sandboxProcess = { env: { NODE_ENV: 'production' } };
+                const allParamValues = [sandboxDocument, sandboxWindow, sandboxProcess, dataConnections.globalVariables, directApiVariables, apiConnectionsMap, ...globalVarValues, ...apiVarValues];
                 
-                const func = new Function(...allParamNames, window.jsCode || '');
-                const result = func(...allParamValues);
+                // Set up error handler for async errors (event listeners, setTimeout, etc)
+                // Only catches errors that originate from the widget's DOM container
+                const handleAsyncError = (event: any) => {
+                    const errorMessage = event.message || String(event);
+                    console.error('Widget Error:', errorMessage);
+                    
+                    const outputContainer = executionRef.current;
+                    if (outputContainer) {
+                        const errorDiv = document.createElement('div');
+                        errorDiv.style.cssText = 'background: #f8d7da; border: 1px solid #f5c6cb; padding: 8px; margin: 5px 0; border-radius: 4px; color: #721c24; font-family: monospace; font-size: 12px;';
+                        errorDiv.textContent = `Widget Error: ${errorMessage}`;
+                        outputContainer.appendChild(errorDiv);
+                    }
+                    
+                    // Prevent the error from propagating
+                    event.preventDefault?.();
+                };
+                
+                // Add error event listener to catch async errors from widget DOM
+                const outputContainer = executionRef.current;
+                outputContainer?.addEventListener('error', handleAsyncError, true);
+                
+                let result: any = undefined;
+                try {
+                    // Use AsyncFunction so `await` works anywhere in user code
+                    const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+                    const func = new AsyncFunction(...allParamNames, window.jsCode || '');
+                    result = func(...allParamValues);
+                    // Attach a .catch so unhandled async errors show up in the widget
+                    if (result && typeof result.then === 'function') {
+                        result.catch((asyncErr: any) => {
+                            const msg = `Error: ${asyncErr instanceof Error ? asyncErr.message : String(asyncErr)}`;
+                            const errDiv = document.createElement('div');
+                            errDiv.style.cssText = 'background: #f8d7da; border: 1px solid #f5c6cb; padding: 8px; margin: 5px 0; border-radius: 4px; color: #721c24; font-family: monospace; font-size: 12px;';
+                            errDiv.textContent = msg;
+                            executionRef.current?.appendChild(errDiv);
+                        });
+                        result = undefined; // Don't display "Return value: [object Promise]"
+                    }
+                } catch (execError) {
+                    // Clean up error handlers
+                    outputContainer?.removeEventListener('error', handleAsyncError, true);
+                    
+                    // Display error in container WITHOUT re-throwing
+                    const errorMessage = `Error: ${execError instanceof Error ? execError.message : String(execError)}`;
+                    console.error(errorMessage);
+                    
+                    if (outputContainer) {
+                        outputContainer.innerHTML = '';
+                        const errorDiv = document.createElement('div');
+                        errorDiv.style.cssText = 'background: #f8d7da; border: 1px solid #f5c6cb; padding: 8px; margin: 5px 0; border-radius: 4px; color: #721c24; font-family: monospace; font-size: 12px;';
+                        errorDiv.textContent = errorMessage;
+                        outputContainer.appendChild(errorDiv);
+                    }
+                    
+                    // Restore console.log
+                    console.log = originalConsoleLog;
+                    
+                    // Return early - don't continue execution after error
+                    return;
+                }
+                
+                // Clean up error handlers after successful execution
+                outputContainer?.removeEventListener('error', handleAsyncError, true);
 
                 // Set up automatic re-fetching for ALL enabled API connections
                 // Uses the connection's configured interval, or 5000ms as default
                 dataConnections.apiConnections
-                    .filter((connection: any) => connection.enabled)
+                    .filter((connection: any) => connection.enabled && connection.trigger?.type !== 'manual')
                     .forEach((connection: any) => {
                         const interval = connection.trigger?.interval > 0 ? connection.trigger.interval : 5000;
                         const intervalId = setInterval(() => {
@@ -444,7 +612,7 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                     const resultDiv = document.createElement('div');
                     resultDiv.style.cssText = 'background: #e8f5e8; border: 1px solid #4caf50; padding: 8px; margin: 5px 0; border-radius: 4px; font-family: monospace; font-size: 12px;';
                     resultDiv.textContent = `Return value: ${String(result)}`;
-                    outputContainer.appendChild(resultDiv);
+                    outputContainer?.appendChild(resultDiv);
                 }
                 
                 // If nothing was displayed, show a success message
@@ -454,8 +622,13 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                     successDiv.textContent = 'Code executed successfully (no visible output)';
                     outputContainer.appendChild(successDiv);
                 }
+                } // end of immediate-execution block
+                
                 
             } catch (err) {
+                // Restore console.log immediately on error
+                console.log = originalConsoleLog;
+                
                 const errorMessage = `Error: ${err instanceof Error ? err.message : String(err)}`;
                 setError(errorMessage);
                 
@@ -468,8 +641,11 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                     errorDiv.textContent = errorMessage;
                     outputContainer.appendChild(errorDiv);
                 }
+            } finally {
+                // Ensure console.log is always restored
+                console.log = originalConsoleLog;
             }
-        }, 10); // Small delay to ensure DOM updates
+        }, 100); // Delay to ensure DOM updates
     };
 
     const handleResize = (e: any, direction: any, ref: any) => {
@@ -490,17 +666,17 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                 position: 'absolute',
                 left: window.position.x,
                 top: window.position.y,
-                border: window.isOffCanvas ? '2px solid #dc3545' : (isHovered || isSelected ? '2px solid #007acc' : (window.type === 'visualization' && window.content ? '1px solid rgba(0,0,0,0.1)' : '1px solid rgba(0,0,0,0.1)')),
+                border: window.isOffCanvas ? '2px solid #dc3545' : (isPrimary ? '2px solid #ff9800' : (isSelected ? '2px solid #007acc' : '1px solid rgba(0,0,0,0.1)')),
                 backgroundColor: window.isOffCanvas ? '#ffe6e6' : (window.type === 'visualization' || window.type === 'html' || (window.type === 'javascript' && hasExecuted && !showCodeEditor) ? 'transparent' : 'white'),
                 borderRadius: '4px',
-                boxShadow: window.isOffCanvas ? '0 4px 20px rgba(220,53,69,0.3)' : (isHovered || isSelected ? '0 4px 20px rgba(0,0,0,0.15)' : '0 2px 10px rgba(0,0,0,0.05)'),
+                boxShadow: window.isOffCanvas ? '0 4px 20px rgba(220,53,69,0.3)' : (isPrimary ? '0 2px 10px rgba(0,0,0,0.05)' : '0 2px 10px rgba(0,0,0,0.05)'),
                 display: 'flex',
                 flexDirection: 'column',
                 zIndex: isSelected ? 1000 : 1,
                 opacity: 1,
-                transition: 'all 0.2s ease'
+                transition: 'border-color 0.2s ease'
             }}
-            onClick={() => onSelect(window.id)}
+            onClick={(e) => onSelect(window.id, e)}
             onMouseEnter={() => setIsHovered(true)}
             onMouseLeave={() => { setIsHovered(false); setHeaderFocused(false); }}
         >
@@ -545,7 +721,10 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                             boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
                             opacity: headerFocused ? 1 : 0.2
                         }}
-                        onClick={(e) => { e.stopPropagation(); setHeaderFocused(true); }}
+                        onClick={(e) => { 
+                            e.stopPropagation();
+                            setHeaderFocused(true);
+                        }}
                         onMouseDown={(e) => {
                             if (onMouseDown) {
                                 onMouseDown(e, window.id, 'drag');
@@ -639,6 +818,7 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                                             📝 Edit
                                         </button>
                                     )}
+
                                 </>
                             )}
                             {window.type === 'html' && (
@@ -838,21 +1018,52 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                     {window.type === 'javascript' ? (
                         <div style={{ height: '100%', width: '100%' }}>
                             {showCodeEditor ? (
-                                <textarea
-                                    value={window.jsCode || ''}
-                                    onChange={(e) => onUpdate(window.id, { jsCode: e.target.value })}
-                                    placeholder="Enter JavaScript code here..."
-                                    style={{
-                                        height: '100%',
-                                        width: '100%',
-                                        fontFamily: 'Monaco, Consolas, monospace',
-                                        fontSize: '12px',
-                                        border: '1px solid #ddd',
-                                        padding: '8px',
-                                        resize: 'none',
-                                        boxSizing: 'border-box'
-                                    }}
-                                />
+                                <div style={{ position: 'relative', height: '100%', width: '100%' }}>
+                                    <textarea
+                                        value={window.jsCode || ''}
+                                        onChange={(e) => onUpdate(window.id, { jsCode: e.target.value })}
+                                        placeholder="Enter JavaScript code here..."
+                                        spellCheck={false}
+                                        autoCorrect="off"
+                                        autoCapitalize="off"
+                                        autoComplete="off"
+                                        style={{
+                                            height: '100%',
+                                            width: '100%',
+                                            fontFamily: "Monaco, Consolas, 'Courier New', monospace",
+                                            fontSize: '12px',
+                                            backgroundColor: '#ffffff',
+                                            color: '#212529',
+                                            border: '1px solid #80bdff',
+                                            padding: '8px',
+                                            resize: 'none',
+                                            boxSizing: 'border-box',
+                                            outline: 'none',
+                                            lineHeight: '1.5',
+                                            cursor: 'text'
+                                        }}
+                                    />
+                                    <button
+                                        onMouseDown={(e) => e.stopPropagation()}
+                                        onClick={(e) => { e.stopPropagation(); setIsEditorFullscreen(true); }}
+                                        title="Expand editor"
+                                        style={{
+                                            position: 'absolute',
+                                            bottom: '6px',
+                                            right: '6px',
+                                            padding: '2px 7px',
+                                            fontSize: '11px',
+                                            backgroundColor: '#ffffff',
+                                            color: '#495057',
+                                            border: '1px solid #ced4da',
+                                            borderRadius: '3px',
+                                            cursor: 'pointer',
+                                            zIndex: 2
+                                        }}
+                                    >
+                                        &#x26F6; Expand
+                                    </button>
+                                </div>
                             ) : (
                                 <div 
                                     ref={executionRef}
@@ -910,6 +1121,7 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
     width: 100%;
     height: 100%;
   }
+  ${fontFaceCSS}
 </style>
 </head>
 <body>
@@ -1034,7 +1246,7 @@ ${window.content}
                                                         style={{
                                                             padding: '4px 8px',
                                                             fontSize: '10px',
-                                                            backgroundColor: '#007acc',
+                                                            backgroundColor: isPrimary ? '#ff9800' : '#007acc',
                                                             color: 'white',
                                                             border: 'none',
                                                             borderRadius: '2px',
@@ -1107,7 +1319,7 @@ ${window.content}
                                 right: 0,
                                 width: '10px',
                                 height: '10px',
-                                backgroundColor: '#007acc',
+                                backgroundColor: isPrimary ? '#ff9800' : '#007acc',
                                 cursor: 'nw-resize',
                                 borderRadius: '0 0 4px 0'
                             }}
@@ -1124,7 +1336,7 @@ ${window.content}
                                 left: 0,
                                 width: '10px',
                                 height: '10px',
-                                backgroundColor: '#007acc',
+                                backgroundColor: isPrimary ? '#ff9800' : '#007acc',
                                 cursor: 'ne-resize',
                                 borderRadius: '0 0 0 4px'
                             }}
@@ -1141,7 +1353,7 @@ ${window.content}
                                 right: 0,
                                 width: '10px',
                                 height: '10px',
-                                backgroundColor: '#007acc',
+                                backgroundColor: isPrimary ? '#ff9800' : '#007acc',
                                 cursor: 'ne-resize',
                                 borderRadius: '0 4px 0 0'
                             }}
@@ -1158,7 +1370,7 @@ ${window.content}
                                 left: 0,
                                 width: '10px',
                                 height: '10px',
-                                backgroundColor: '#007acc',
+                                backgroundColor: isPrimary ? '#ff9800' : '#007acc',
                                 cursor: 'nw-resize',
                                 borderRadius: '4px 0 0 0'
                             }}
@@ -1177,7 +1389,7 @@ ${window.content}
                                 left: '10px',
                                 right: '10px',
                                 height: '4px',
-                                backgroundColor: '#007acc',
+                                backgroundColor: isPrimary ? '#ff9800' : '#007acc',
                                 cursor: 'ns-resize'
                             }}
                             onMouseDown={(e) => {
@@ -1193,7 +1405,7 @@ ${window.content}
                                 bottom: '10px',
                                 right: 0,
                                 width: '4px',
-                                backgroundColor: '#007acc',
+                                backgroundColor: isPrimary ? '#ff9800' : '#007acc',
                                 cursor: 'ew-resize'
                             }}
                             onMouseDown={(e) => {
@@ -1205,6 +1417,56 @@ ${window.content}
                     </>
                 )}
             </>
+
+            {/* Fullscreen code editor overlay */}
+            {isEditorFullscreen && (
+                <div
+                    style={{
+                        position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                        backgroundColor: '#ffffff', zIndex: 99999,
+                        display: 'flex', flexDirection: 'column'
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    onMouseDown={(e) => e.stopPropagation()}
+                >
+                    <div style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        padding: '8px 14px', backgroundColor: '#f8f9fa',
+                        borderBottom: '1px solid #dee2e6', flexShrink: 0
+                    }}>
+                        <span style={{ color: '#495057', fontSize: '13px', fontFamily: "Monaco, Consolas, 'Courier New', monospace" }}>
+                            {window.title || 'JavaScript Editor'}
+                        </span>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                            <button
+                                onClick={() => { setIsEditorFullscreen(false); executeJavaScript(); }}
+                                style={{ padding: '4px 12px', fontSize: '12px', backgroundColor: '#0e639c', color: 'white', border: 'none', borderRadius: '3px', cursor: 'pointer' }}
+                            >&#9654; Run</button>
+                            <button
+                                onClick={() => setIsEditorFullscreen(false)}
+                                style={{ padding: '4px 12px', fontSize: '12px', backgroundColor: '#ffffff', color: '#495057', border: '1px solid #ced4da', borderRadius: '3px', cursor: 'pointer' }}
+                            >&#x2715; Close</button>
+                        </div>
+                    </div>
+                    <textarea
+                        value={window.jsCode || ''}
+                        onChange={(e) => onUpdate(window.id, { jsCode: e.target.value })}
+                        placeholder="Enter JavaScript code here..."
+                        spellCheck={false}
+                        autoCorrect="off"
+                        autoCapitalize="off"
+                        autoComplete="off"
+                        autoFocus
+                        style={{
+                            flex: 1, width: '100%',
+                            fontFamily: "Monaco, Consolas, 'Courier New', monospace",
+                            fontSize: '13px', backgroundColor: '#ffffff', color: '#212529',
+                            border: 'none', padding: '12px 16px',
+                            resize: 'none', outline: 'none', lineHeight: '1.6', boxSizing: 'border-box'
+                        }}
+                    />
+                </div>
+            )}
         </div>
     );
 };

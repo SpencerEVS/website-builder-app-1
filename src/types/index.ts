@@ -53,7 +53,7 @@ export interface BuilderPage {
 }
 
 export interface ApiTrigger {
-    type: 'cyclic' | 'conditional';
+    type: 'cyclic' | 'conditional' | 'manual';
     interval?: number; // For cyclic triggers (in milliseconds)
     condition?: {
         variable: string;

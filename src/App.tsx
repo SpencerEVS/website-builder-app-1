@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import DragDropCanvas from './components/DragDropCanvas';
 import VisualizationLibrary from './components/VisualizationLibrary';
 import ExportManager from './components/ExportManager';
@@ -30,6 +30,7 @@ const App: React.FC = () => {
     }
   ]);
   const [activeBuilderPageId, setActiveBuilderPageId] = useState<string>('page-1');
+  const [appName, setAppName] = useState<string>('My Web App');
   
   // Global state (shared across all pages)
   const [dataConnections, setDataConnections] = useState<DataConnection>({
@@ -41,6 +42,93 @@ const App: React.FC = () => {
   const [layersVisible, setLayersVisible] = useState<boolean>(false);
   const [exportVisible, setExportVisible] = useState<boolean>(false);
   const [activeLayer, setActiveLayer] = useState<number>(1);
+  const [selectedWindowId, setSelectedWindowId] = useState<string | null>(null);
+  const [leftPanelWidth, setLeftPanelWidth] = useState<number>(350);
+  const [layersWidth, setLayersWidth] = useState<number>(350);
+  const [exportWidth, setExportWidth] = useState<number>(350);
+  const panelDragRef = useRef<{ panel: 'left' | 'layers' | 'export'; startX: number; startWidth: number } | null>(null);
+  const [isDraggingPanel, setIsDraggingPanel] = useState<boolean>(false);
+
+  const handlePanelDragStart = (panel: 'left' | 'layers' | 'export', e: React.MouseEvent) => {
+    e.preventDefault();
+    const startWidth = panel === 'left' ? leftPanelWidth : panel === 'layers' ? layersWidth : exportWidth;
+    panelDragRef.current = { panel, startX: e.clientX, startWidth };
+    setIsDraggingPanel(true);
+  };
+
+  useEffect(() => {
+    const onMouseMove = (e: MouseEvent) => {
+      const drag = panelDragRef.current;
+      if (!drag) return;
+      const dx = e.clientX - drag.startX;
+      const newWidth = Math.max(180, Math.min(700, drag.startWidth + (drag.panel === 'left' ? dx : -dx)));
+      if (drag.panel === 'left') setLeftPanelWidth(newWidth);
+      else if (drag.panel === 'layers') setLayersWidth(newWidth);
+      else setExportWidth(newWidth);
+    };
+    const onMouseUp = () => {
+      if (panelDragRef.current) {
+        panelDragRef.current = null;
+        setIsDraggingPanel(false);
+      }
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+  }, []);
+
+  // Set document title based on app name
+  useEffect(() => {
+    document.title = appName;
+  }, [appName]);
+
+  // Global font injector — runs independently of Font Loader template
+  useEffect(() => {
+    function injectBuilderFonts() {
+      try {
+        const gw: any = window;
+        const allF = gw.globalFonts || {};
+        const keys = Object.keys(allF);
+        if (!keys.length) return;
+        const css = keys.map((fn: string) =>
+          `@font-face { font-family: "${fn}"; src: url("${allF[fn]}"); }`
+        ).join('\n');
+        // Inject into main document (covers JS-type windows)
+        let pStyle: any = document.getElementById('__builderFonts');
+        if (!pStyle) {
+          pStyle = document.createElement('style');
+          pStyle.id = '__builderFonts';
+          document.head.appendChild(pStyle);
+        }
+        pStyle.textContent = css;
+        // Inject into all same-origin iframes (covers HTML-type windows)
+        const frames = document.querySelectorAll('iframe');
+        frames.forEach((frame: HTMLIFrameElement) => {
+          try {
+            const fdoc = frame.contentDocument;
+            if (!fdoc || !fdoc.head) return;
+            let fStyle: any = fdoc.getElementById('__globalFonts');
+            if (!fStyle) {
+              fStyle = fdoc.createElement('style');
+              fStyle.id = '__globalFonts';
+              fdoc.head.appendChild(fStyle);
+            }
+            fStyle.textContent = css;
+          } catch (e) {}
+        });
+      } catch (e) {}
+    }
+    // Expose globally so ExportManager can call it after import
+    const gwInject: any = window;
+    gwInject.__injectBuilderFonts = injectBuilderFonts;
+    // Poll every 2s to catch fonts set by Font Loader or JSON import
+    const id = setInterval(injectBuilderFonts, 2000);
+    injectBuilderFonts();
+    return () => clearInterval(id);
+  }, []);
 
   // Expose builder pages to window object for navigation templates
   React.useEffect(() => {
@@ -217,7 +305,7 @@ const App: React.FC = () => {
       title: template.name,
       type,
       content: type === 'html' ? template.code : (type === 'visualization' ? template.content : ''),
-      position: { 
+      position: template.defaultPosition ? { x: template.defaultPosition.x, y: template.defaultPosition.y } : { 
         x: Math.random() * 300 + 50, 
         y: Math.random() * 200 + 50 
       },
@@ -263,6 +351,16 @@ const App: React.FC = () => {
                   : layer
               )
             }
+          : page
+      )
+    );
+  };
+
+  const handleBuilderPageNameChange = (pageId: string, name: string) => {
+    setBuilderPages(prev =>
+      prev.map(page =>
+        page.id === pageId
+          ? { ...page, name }
           : page
       )
     );
@@ -338,6 +436,16 @@ const App: React.FC = () => {
               layerStates: page.layerStates.filter(layer => layer.layerNumber !== layerNumber)
             }
           : page
+      )
+    );
+  };
+
+  const handleUpdateWindow = (windowId: string, updates: Partial<WindowPanel>) => {
+    setWindows(prev =>
+      prev.map(window =>
+        window.id === windowId
+          ? { ...window, ...updates }
+          : window
       )
     );
   };
@@ -455,36 +563,24 @@ const App: React.FC = () => {
       </div>
 
       {/* Main Layout */}
-      <div style={{
-        flex: 1,
-        display: 'flex',
-        overflow: 'hidden'
-      }}>
+      <div
+        style={{ flex: 1, display: 'flex', overflow: 'hidden', cursor: isDraggingPanel ? 'col-resize' : 'default', userSelect: isDraggingPanel ? 'none' : 'auto' }}
+      >
         {activeTab === 'builder' ? (
           <>
             {/* Left Sidebar - Templates */}
             {leftPanelVisible && (
-              <div 
+              <div
                 style={{
-                  width: '250px',
+                  width: leftPanelWidth,
+                  minWidth: '180px',
                   backgroundColor: '#ffffff',
                   borderRight: '3px solid rgba(108, 117, 125, 0.3)',
-                  overflow: 'auto',
-                  transition: 'width 0.3s ease, z-index 0s 0.3s',
+                  overflow: 'hidden',
                   position: 'relative',
                   zIndex: 1,
-                  minWidth: '250px',
-                  boxShadow: 'none'
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.width = '350px';
-                  e.currentTarget.style.zIndex = '10';
-                  e.currentTarget.style.boxShadow = '2px 0 8px rgba(108,117,125,0.2)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.width = '250px';
-                  e.currentTarget.style.zIndex = '1';
-                  e.currentTarget.style.boxShadow = 'none';
+                  display: 'flex',
+                  flexDirection: 'column'
                 }}
               >
                 {/* Clickable Tab Header */}
@@ -507,7 +603,23 @@ const App: React.FC = () => {
                   <span>TEMPLATES</span>
                   <span style={{ fontSize: '12px' }}>◀</span>
                 </div>
-                <VisualizationLibrary onAddTemplate={handleAddTemplate} />
+                <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+                  <VisualizationLibrary onAddTemplate={handleAddTemplate} />
+                </div>
+                {/* Drag resize handle */}
+                <div
+                  onMouseDown={(e) => handlePanelDragStart('left', e)}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    right: 0,
+                    width: '5px',
+                    height: '100%',
+                    cursor: 'col-resize',
+                    zIndex: 20,
+                    backgroundColor: 'transparent'
+                  }}
+                />
               </div>
             )}
 
@@ -573,8 +685,11 @@ const App: React.FC = () => {
                   backgroundConfig={backgroundConfig}
                   onBackgroundConfigChange={setBackgroundConfig}
                   dataConnections={dataConnections}
+                  onDataConnectionsChange={setDataConnections}
                   layerStates={builderPages.find(page => page.id === activeBuilderPageId)?.layerStates || []}
                   onMoveWindowLayer={handleMoveWindowLayer}
+                  onWindowSelect={setSelectedWindowId}
+                  activeLayer={activeLayer}
                 />
               </div>
             </div>
@@ -583,29 +698,17 @@ const App: React.FC = () => {
             <>
               {/* Layers Sidebar */}
               {layersVisible && (
-                <div 
+                <div
                   style={{
-                    width: '250px',
+                    width: layersWidth,
+                    minWidth: '180px',
                     backgroundColor: '#ffffff',
                     borderLeft: '3px solid rgba(108, 117, 125, 0.3)',
-                    overflow: 'auto',
-                    transition: 'width 0.3s ease, z-index 0s 0.3s',
+                    overflow: 'hidden',
                     position: 'relative',
                     zIndex: 1,
-                    minWidth: '250px',
-                    boxShadow: 'none',
                     display: 'flex',
                     flexDirection: 'column'
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.width = '350px';
-                    e.currentTarget.style.zIndex = '10';
-                    e.currentTarget.style.boxShadow = '-2px 0 8px rgba(108,117,125,0.2)';
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.width = '250px';
-                    e.currentTarget.style.zIndex = '1';
-                    e.currentTarget.style.boxShadow = 'none';
                   }}
                 >
                   {/* Layers Header */}
@@ -625,14 +728,28 @@ const App: React.FC = () => {
                       borderBottom: '2px solid rgba(108, 117, 125, 0.3)',
                       transition: 'background-color 0.2s ease'
                     }}
-                    title="Close Layers panel"
+                    title="Close Tools panel"
                   >
-                    <span>LAYERS</span>
+                    <span>TOOLS</span>
                     <span style={{ fontSize: '12px' }}>▶</span>
                   </div>
                   
+                  {/* Drag resize handle */}
+                  <div
+                    onMouseDown={(e) => handlePanelDragStart('layers', e)}
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '5px',
+                      height: '100%',
+                      cursor: 'col-resize',
+                      zIndex: 20,
+                      backgroundColor: 'transparent'
+                    }}
+                  />
                   {/* Layers Content */}
-                  <div style={{ height: '100%', overflow: 'auto' }}>
+                  <div style={{ flex: 1, overflow: 'hidden', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
                     <LayerManagement
                       layerStates={builderPages.find(page => page.id === activeBuilderPageId)?.layerStates || []}
                       windows={windows}
@@ -643,6 +760,17 @@ const App: React.FC = () => {
                       onRemoveLayer={removeLayer}
                       activeLayer={activeLayer}
                       onLayerSelect={setActiveLayer}
+                      selectedWindow={selectedWindowId ? windows.find(w => w.id === selectedWindowId) : null}
+                      onWindowUpdate={handleUpdateWindow}
+                      backgroundConfig={backgroundConfig}
+                      onBackgroundConfigChange={setBackgroundConfig}
+                      builderPages={builderPages}
+                      activeBuilderPageId={activeBuilderPageId}
+                      onBuilderPageNameChange={handleBuilderPageNameChange}
+                      appName={appName}
+                      onAppNameChange={setAppName}
+                      dataConnections={dataConnections}
+                      onDataConnectionsChange={setDataConnections}
                     />
                   </div>
                 </div>
@@ -650,29 +778,17 @@ const App: React.FC = () => {
 
               {/* Export Sidebar */}
               {exportVisible && (
-                <div 
+                <div
                   style={{
-                    width: '250px',
+                    width: exportWidth,
+                    minWidth: '180px',
                     backgroundColor: '#ffffff',
                     borderLeft: '3px solid rgba(108, 117, 125, 0.3)',
-                    overflow: 'auto',
-                    transition: 'width 0.3s ease, z-index 0s 0.3s',
+                    overflow: 'hidden',
                     position: 'relative',
                     zIndex: 1,
-                    minWidth: '250px',
-                    boxShadow: 'none',
                     display: 'flex',
                     flexDirection: 'column'
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.width = '350px';
-                    e.currentTarget.style.zIndex = '10';
-                    e.currentTarget.style.boxShadow = '-2px 0 8px rgba(108,117,125,0.2)';
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.width = '250px';
-                    e.currentTarget.style.zIndex = '1';
-                    e.currentTarget.style.boxShadow = 'none';
                   }}
                 >
                   {/* Export Header */}
@@ -698,8 +814,22 @@ const App: React.FC = () => {
                     <span style={{ fontSize: '12px' }}>▶</span>
                   </div>
                   
+                  {/* Drag resize handle */}
+                  <div
+                    onMouseDown={(e) => handlePanelDragStart('export', e)}
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '5px',
+                      height: '100%',
+                      cursor: 'col-resize',
+                      zIndex: 20,
+                      backgroundColor: 'transparent'
+                    }}
+                  />
                   {/* Export Content */}
-                  <div style={{ height: '100%', overflow: 'auto' }}>
+                  <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
                     <ExportManager 
                       builderPages={builderPages}
                       onBuilderPagesChange={setBuilderPages}
@@ -709,6 +839,7 @@ const App: React.FC = () => {
                       dataConnections={dataConnections}
                       onWindowsChange={setWindows}
                       onDataConnectionsChange={setDataConnections}
+                      appName={appName}
                     />
                   </div>
                 </div>
@@ -742,7 +873,7 @@ const App: React.FC = () => {
                     alignItems: 'center',
                     gap: '8px'
                   }}>
-                    <span>LAYERS</span>
+                    <span>TOOLS</span>
                     <span style={{ fontSize: '12px' }}>◀</span>
                   </div>
                 </div>

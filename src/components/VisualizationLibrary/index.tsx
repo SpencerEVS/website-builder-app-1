@@ -313,11 +313,6 @@ console.log('Variables Display Widget initialized - auto-updating without refres
         code: `// CUSTOMIZE: Change the variable name below to desired global variable (e.g., 'temperature', 'pressure', 'userInput')
 const VARIABLE_NAME = 'ioFieldValue';
 
-// Initialize variable if it doesn't exist (fallback creates empty string)
-if (globalVariables[VARIABLE_NAME] === undefined) {
-  globalVariables[VARIABLE_NAME] = '';
-}
-
 // Create IO Field Element
 const ioField = document.createElement('input');
 ioField.type = 'text';
@@ -356,6 +351,8 @@ let editTimeoutId = null;
 
 // Mark as editing when user types
 ioField.addEventListener('input', () => {
+  // Initialize variable on first edit if not already set
+  if (globalVariables[VARIABLE_NAME] === undefined) globalVariables[VARIABLE_NAME] = '';
   isUserEditing = true;
   // Clear any existing timeout
   if (editTimeoutId) clearTimeout(editTimeoutId);
@@ -408,6 +405,187 @@ container.style.cssText = \`
 
 container.appendChild(ioField);
 document.body.appendChild(container);`
+    },
+    'event-button': {
+        name: 'Event Button',
+        description: 'Button that displays a variable and sets an event variable on click; background tracks the event variable',
+        code: `// CUSTOMIZE: variable whose value is shown as button label
+const DISPLAY_VARIABLE = 'Left_Interval';
+
+// CUSTOMIZE: variable that is SET when the button is clicked AND drives the background color
+const EVENT_VARIABLE = 'List_Select';
+
+// CUSTOMIZE: map EVENT_VARIABLE values to background colors
+const COLOR_MAP = {
+  '0': '#000000',
+  '1': '#00B5E2',
+};
+const DEFAULT_COLOR = '#000000';
+
+const getColor = () => COLOR_MAP[String(globalVariables[EVENT_VARIABLE])] || DEFAULT_COLOR;
+
+// Create button
+const button = document.createElement('button');
+button.style.cssText = \`
+  width: 150px;
+  padding: 12px 16px;
+  border: 3px solid #FFFFFF;
+  border-radius: 24px;
+  background-color: \${getColor()};
+  color: #FFFFFF;
+  font-family: Arial, sans-serif;
+  font-size: 16px;
+  font-weight: bold;
+  outline: none;
+  transition: background-color 0.3s ease;
+  box-shadow: 0 0 10px rgba(255,255,255,0.3);
+  cursor: pointer;
+\`;
+
+button.textContent = String(globalVariables[DISPLAY_VARIABLE]);
+
+button.addEventListener('focus', () => { button.style.boxShadow = '0 0 20px rgba(255,255,255,0.6)'; });
+button.addEventListener('blur',  () => { button.style.boxShadow = '0 0 10px rgba(255,255,255,0.3)'; });
+
+button.addEventListener('click', () => {
+  // Initialize variables on first click if not already set
+  if (globalVariables[DISPLAY_VARIABLE] === undefined) globalVariables[DISPLAY_VARIABLE] = '0';
+  if (globalVariables[EVENT_VARIABLE] === undefined) globalVariables[EVENT_VARIABLE] = '0';
+  globalVariables[EVENT_VARIABLE] = String(1);
+  button.style.backgroundColor = getColor();
+  console.log(EVENT_VARIABLE + ' set to:', globalVariables[EVENT_VARIABLE]);
+});
+
+// Sync display text and background every 500ms
+setInterval(() => {
+  button.textContent = String(globalVariables[DISPLAY_VARIABLE]);
+  button.style.backgroundColor = getColor();
+}, 500);
+
+const container = document.createElement('div');
+container.style.cssText = 'display:flex;align-items:center;justify-content:center;width:100%;height:100%;background:transparent;';
+container.appendChild(button);
+document.body.appendChild(container);`
+    },
+    'color-dropdown': {
+        name: 'Color Dropdown',
+        description: 'Dropdown list with color-coded background that tracks a variable',
+        code: `// CUSTOMIZE: variable that is SET when dropdown changes AND drives the background color
+const EVENT_VARIABLE = 'ADD_L';
+
+// CUSTOMIZE: map EVENT_VARIABLE values to background colors
+const COLOR_MAP = {
+  '0': '#00B5E2',
+  '1': '#000000',
+};
+const DEFAULT_COLOR = '#000000';
+
+// CUSTOMIZE: dropdown options (value: label pairs)
+const OPTIONS = {
+  '0': 'Option 1',
+  '1': 'Option 2',
+};
+
+const getColor = () => COLOR_MAP[String(globalVariables[EVENT_VARIABLE])] || DEFAULT_COLOR;
+
+// Initialize variables if they don't exist
+if (globalVariables[EVENT_VARIABLE] === undefined) globalVariables[EVENT_VARIABLE] = 0;
+
+// Create dropdown
+const select = document.createElement('select');
+select.style.cssText = \`
+  width: 650px;
+  padding: 12px 16px;
+  border: 3px solid #FFFFFF;
+  border-radius: 30px;
+  background-color: \${getColor()};
+  color: #FFFFFF;
+  font-family: Arial, sans-serif;
+  font-size: 16px;
+  font-weight: bold;
+  outline: none;
+  transition: background-color 0.3s ease, box-shadow 0.3s ease;
+  box-shadow: 0 0 10px rgba(255,255,255,0.3);
+  cursor: pointer;
+\`;
+
+// Add options
+Object.entries(OPTIONS).forEach(([value, label]) => {
+  const option = document.createElement('option');
+  option.value = value;
+  option.textContent = label;
+  select.appendChild(option);
+});
+
+// Set initial value
+select.value = String(globalVariables[EVENT_VARIABLE]);
+
+select.addEventListener('change', () => {
+  globalVariables[EVENT_VARIABLE] = parseInt(select.value);
+  select.style.backgroundColor = getColor();
+  console.log(EVENT_VARIABLE + ' set to:', globalVariables[EVENT_VARIABLE]);
+});
+
+select.addEventListener('mouseenter', () => { 
+  select.style.color = 'rgba(255,255,255,0.6)';
+  select.style.boxShadow = 'inset 0 0 20px rgba(255,255,255,0.6)';
+});
+
+select.addEventListener('mouseleave', () => {   
+  select.style.color = 'rgba(255,255,255,1.0)';
+  select.style.boxShadow = '0 0 10px rgba(255,255,255,0.3)';
+});
+
+// Sync dropdown value and background color every 500ms
+setInterval(() => {
+  select.style.backgroundColor = getColor();
+  select.value = String(globalVariables[EVENT_VARIABLE]);
+}, 500);
+
+const container = document.createElement('div');
+container.style.cssText = 'display:flex;align-items:center;justify-content:center;width:100%;height:100%;background:transparent;';
+container.appendChild(select);
+document.body.appendChild(container);`
+    },
+    'page-navigation': {
+        name: 'Page Navigation',
+        description: 'Navigation buttons for all pages in the builder',
+        code: `// Page Navigation Menu
+const container = document.createElement('div');
+container.style.cssText = 'padding: 20px; font-family: Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.15); max-width: 600px; margin: 20px auto;';
+
+const title = document.createElement('h2');
+title.textContent = '📄 Page Navigation';
+title.style.cssText = 'color: white; text-align: center; margin: 0 0 20px 0; padding-bottom: 10px; border-bottom: 2px solid rgba(255,255,255,0.3);';
+container.appendChild(title);
+
+const buttonContainer = document.createElement('div');
+buttonContainer.style.cssText = 'display: flex; flex-wrap: wrap; gap: 12px; justify-content: center;';
+
+const funcs = window.pageFunctions || {};
+const keys = Object.keys(funcs);
+
+if (keys.length === 0) {
+    const msg = document.createElement('p');
+    msg.textContent = 'No pages found. Create multiple pages to see navigation buttons.';
+    msg.style.cssText = 'color: rgba(255,255,255,0.9); font-style: italic; text-align: center; padding: 20px; background: rgba(255,255,255,0.1); border-radius: 8px; margin: 0;';
+    container.appendChild(msg);
+} else {
+    keys.forEach(funcName => {
+        const btn = document.createElement('button');
+        btn.textContent = '📄 ' + funcName.replace(/^goTo/, '').replace(/([A-Z])/g, ' $1').trim();
+        btn.style.cssText = 'padding: 12px 20px; background: rgba(255,255,255,0.2); color: white; border: 2px solid rgba(255,255,255,0.3); border-radius: 25px; cursor: pointer; font-size: 14px; font-weight: 500;';
+        btn.addEventListener('mouseenter', () => { btn.style.background = 'rgba(255,255,255,0.35)'; });
+        btn.addEventListener('mouseleave', () => { btn.style.background = 'rgba(255,255,255,0.2)'; });
+        btn.addEventListener('click', () => {
+            if (typeof funcs[funcName] === 'function') funcs[funcName]();
+        });
+        buttonContainer.appendChild(btn);
+    });
+    container.appendChild(buttonContainer);
+}
+
+document.body.appendChild(container);`
     }
 };
 
@@ -442,6 +620,165 @@ const htmlTemplates = {
         </button>
     </div>
 </div>`
+    },
+    'font-loader': {
+        name: 'Font Loader',
+        description: 'Load custom fonts — paste base64, set a name, click Load',
+        defaultSize: { width: 1200, height: 800 },
+        defaultPosition: { x: 0, y: 0 },
+        code: `<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: #1e1e2e; color: #cdd6f4; font-family: sans-serif; font-size: 13px; }
+  .note { background: #2a2a3e; border-left: 3px solid #28a745; padding: 8px 12px; border-radius: 4px; font-size: 12px; color: #a6adc8; margin-bottom: 14px; }
+  .note strong { color: #28a745; }
+  h3 { font-size: 14px; color: #cba6f7; margin: 0 0 12px 0; }
+  label { display: block; font-size: 11px; color: #a6adc8; margin-bottom: 3px; margin-top: 8px; }
+  input[type=text] { width: 100%; padding: 5px 8px; font-size: 13px; background: #313244; color: #cdd6f4; border: 1px solid #45475a; border-radius: 4px; outline: none; }
+  textarea { width: 100%; padding: 5px 8px; font-size: 11px; background: #181825; color: #a6adc8; border: 1px solid #45475a; border-radius: 4px; outline: none; font-family: monospace; resize: vertical; }
+  .load-btn { margin-top: 10px; padding: 7px 14px; font-size: 13px; background: #28a745; color: #ffffff; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; width: 100%; }
+  .load-btn:hover { background: #218838; }
+  #status { margin-top: 7px; font-size: 12px; font-weight: bold; min-height: 18px; padding: 6px 10px; border-radius: 4px; background: #2a2a3e; }
+  #status:empty { background: transparent; padding: 0; }
+  #status.ok { color: #28a745; }
+  #status.err { color: #f38ba8; }
+  hr { border: none; border-top: 1px solid #313244; margin: 14px 0; }
+  #preview-input { width: 100%; padding: 5px 8px; font-size: 13px; background: #181825; color: #cdd6f4; border: 1px solid #45475a; border-radius: 4px; outline: none; margin-bottom: 10px; }
+  #font-list { display: flex; flex-direction: column; gap: 8px; }
+  .font-row { background: #313244; border-radius: 4px; padding: 8px 10px; }
+  .font-row-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .font-name-label { font-size: 10px; color: #a6adc8; letter-spacing: 0.05em; text-transform: uppercase; }
+  .font-sample { font-size: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .remove-btn { font-size: 11px; background: transparent; border: 1px solid #45475a; color: #f38ba8; border-radius: 3px; cursor: pointer; padding: 1px 6px; }
+</style>
+
+<div class="note"><strong>Tip:</strong> Once your fonts are loaded, this window can be safely removed — fonts persist in the background until the page is refreshed.</div>
+<h3>Font Loader</h3>
+<label for="fn">Font Name</label>
+<input id="fn" type="text" placeholder="e.g. My Font" />
+<label for="fb">Base64 Data (paste raw base64 OR full data URI)</label>
+<textarea id="fb" rows="4" placeholder="AAEF... or data:font/ttf;base64,AAEF..."></textarea>
+<button class="load-btn" id="load-btn">Load Font</button>
+<div id="status"></div>
+<hr>
+<input id="preview-input" type="text" placeholder="Preview text…" value="The quick brown fox 0123456789" />
+<div id="font-list"></div>
+
+<script>
+(function() {
+  var injected = {};
+
+  function detectMime(b64) {
+    try {
+      var d = atob(b64.substring(0, 12));
+      if (d.charCodeAt(0) === 0 && d.charCodeAt(1) === 1) return 'font/ttf';
+      if (d.substring(0, 4) === 'OTTO') return 'font/otf';
+      if (d.substring(0, 4) === 'wOFF') return 'font/woff';
+      if (d.substring(0, 4) === 'wOF2') return 'font/woff2';
+      if (d.substring(0, 4) === 'true') return 'font/ttf';
+      // AAEF starts == \\x00\\x01\\x00\\x00 which is charCode 0,1 — caught above
+    } catch(e) {}
+    return 'font/ttf';
+  }
+
+  function makeDataUri(raw) {
+    raw = raw.trim().replace(/[\\r\\n\\s]/g, '');
+    if (raw.indexOf('data:') === 0) return raw;
+    return 'data:' + detectMime(raw) + ';base64,' + raw;
+  }
+
+  function injectStyle(name, uri) {
+    if (injected[name]) return;
+    var el = document.getElementById('_gf_styles');
+    if (!el) { el = document.createElement('style'); el.id = '_gf_styles'; document.head.appendChild(el); }
+    el.textContent += '@font-face { font-family: "' + name + '"; src: url("' + uri + '"); }\\n';
+    injected[name] = true;
+  }
+
+  document.getElementById('load-btn').addEventListener('click', function() {
+    var name = document.getElementById('fn').value.trim();
+    var raw  = document.getElementById('fb').value.trim();
+    var st   = document.getElementById('status');
+    if (!name) { st.textContent = '✗ Enter a font name.'; st.className = 'err'; return; }
+    if (!raw)  { st.textContent = '✗ Paste font base64 data.'; st.className = 'err'; return; }
+    try {
+      var uri = makeDataUri(raw);
+      window.parent.globalFonts = window.parent.globalFonts || {};
+      window.parent.globalFonts[name] = uri;
+      st.textContent = '✓ "' + name + '" loaded — use font-family: "' + name + '" in any window';
+      st.className = 'ok';
+      renderList();
+    } catch(e) {
+      st.textContent = '✗ Error: ' + e.message;
+      st.className = 'err';
+    }
+    try { injectFontsEverywhere(); } catch(eInj) {}
+  });
+
+  function renderList() {
+    var gf = (window.parent && window.parent.globalFonts) ? window.parent.globalFonts : {};
+    var names = Object.keys(gf).filter(function(n) { return gf[n] && gf[n].indexOf('data:') === 0; });
+    var list = document.getElementById('font-list');
+    var text = document.getElementById('preview-input').value || 'AaBbCc 0123456789';
+    names.forEach(function(n) { injectStyle(n, gf[n]); });
+    list.innerHTML = '';
+    if (!names.length) {
+      list.innerHTML = '<div style="color:#585b70;font-size:12px;margin-top:6px;">No fonts loaded yet.</div>';
+      return;
+    }
+    names.forEach(function(name) {
+      var row = document.createElement('div');
+      row.className = 'font-row';
+      row.innerHTML =
+        '<div class="font-row-header">' +
+          '<span class="font-name-label">' + name + '</span>' +
+          '<button class="remove-btn" data-f="' + name + '">✕</button>' +
+        '</div>' +
+        '<div class="font-sample" style="font-family:\\'' + name + '\\'">' + text + '</div>';
+      list.appendChild(row);
+    });
+    Array.from(list.querySelectorAll('.remove-btn')).forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        if (window.parent.globalFonts) delete window.parent.globalFonts[btn.getAttribute('data-f')];
+        renderList();
+        try { injectFontsEverywhere(); } catch(eInj) {}
+      });
+    });
+  }
+
+  // Inject font CSS directly into all open builder iframes and the parent document head
+  // This avoids changing srcDoc (which would reload the iframes)
+  function injectFontsEverywhere() {
+    var allF = (window.parent && window.parent.globalFonts) ? window.parent.globalFonts : {};
+    var css = Object.keys(allF).map(function(fn) {
+      return '@font-face { font-family: "' + fn + '"; src: url("' + allF[fn] + '"); }';
+    }).join('\\n');
+    // 1. Inject into parent document.head for JS-type windows rendered in main DOM
+    try {
+      var pDoc = window.parent.document;
+      var pStyle = pDoc.getElementById('__builderFonts');
+      if (!pStyle) { pStyle = pDoc.createElement('style'); pStyle.id = '__builderFonts'; pDoc.head.appendChild(pStyle); }
+      pStyle.textContent = css;
+    } catch(e) {}
+    // 2. Inject into every iframe on the parent page (HTML-type windows)
+    try {
+      var frames = window.parent.document.querySelectorAll('iframe');
+      for (var i = 0; i < frames.length; i++) {
+        try {
+          var fdoc = frames[i].contentDocument;
+          if (!fdoc || !fdoc.head) continue;
+          var fStyle = fdoc.getElementById('__globalFonts');
+          if (!fStyle) { fStyle = fdoc.createElement('style'); fStyle.id = '__globalFonts'; fdoc.head.appendChild(fStyle); }
+          fStyle.textContent = css;
+        } catch(fe) {}
+      }
+    } catch(e2) {}
+  }
+
+  document.getElementById('preview-input').addEventListener('input', renderList);
+  renderList();
+  setInterval(renderList, 1000);
+})();
+</script>`
     },
     'dashboard': {
         name: 'Dashboard Layout',
@@ -488,6 +825,8 @@ interface Template {
     type?: 'javascript' | 'html';
     saved?: string;
     lastModified?: string;
+    defaultSize?: { width: number; height: number };
+    defaultPosition?: { x: number; y: number };
 }
 
 interface VisualizationLibraryProps {
@@ -545,8 +884,12 @@ const VisualizationLibrary: React.FC<VisualizationLibraryProps> = ({ onSelect, o
             if (templateId === 'clock-widget') template = codeTemplates['clock-widget'];
             if (templateId === 'variables-display') template = codeTemplates['variables-display'];
             if (templateId === 'io-field') template = codeTemplates['io-field'];
+            if (templateId === 'event-button') template = codeTemplates['event-button'];
+            if (templateId === 'page-navigation') template = codeTemplates['page-navigation'];
+            if (templateId === 'color-dropdown') template = codeTemplates['color-dropdown'];
         } else if (activeTab === 'html') {
             if (templateId === 'landing-page') template = htmlTemplates['landing-page'];
+            if (templateId === 'font-loader') template = htmlTemplates['font-loader'];
             if (templateId === 'dashboard') template = htmlTemplates['dashboard'];
         } else if (activeTab === 'local') {
             template = localTemplates[templateId];

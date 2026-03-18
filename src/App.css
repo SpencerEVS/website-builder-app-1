@@ -49,23 +49,14 @@ h1, h2, h3, h4, h5, h6, button, input, textarea, select {
 /* Button hover effects */
 button:hover {
   opacity: 0.9;
-  transform: translateY(-1px);
   transition: all 0.2s ease;
 }
 
 button:active {
-  transform: translateY(0);
+  opacity: 0.8;
 }
 
 /* Window panel animations */
-.window-panel {
-  transition: all 0.2s ease;
-}
-
-.window-panel:hover {
-  box-shadow: 0 4px 15px rgba(0,0,0,0.15) !important;
-}
-
 .window-panel.selected {
   z-index: 1000;
 }

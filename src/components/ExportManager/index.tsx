@@ -14,6 +14,7 @@ interface ExportManagerProps {
     dataConnections?: DataConnection;
     onWindowsChange?: (windows: WindowPanelType[]) => void;
     onDataConnectionsChange?: (dataConnections: DataConnection) => void;
+    appName?: string;
 }
 
 const ExportManager: React.FC<ExportManagerProps> = ({ 
@@ -24,16 +25,20 @@ const ExportManager: React.FC<ExportManagerProps> = ({
     onBackgroundConfigChange, 
     dataConnections = { apiConnections: [], globalVariables: {} },
     onWindowsChange,
-    onDataConnectionsChange
+    onDataConnectionsChange,
+    appName = 'website'
 }) => {
     const [exportFormat, setExportFormat] = useState<'html' | 'js' | 'json'>('html');
-    const [isExportExpanded, setIsExportExpanded] = useState(false);
-    const [isImportExpanded, setIsImportExpanded] = useState(false);
-    const [isGlobalVariablesExpanded, setIsGlobalVariablesExpanded] = useState(false);
-    const [isPageFunctionsExpanded, setIsPageFunctionsExpanded] = useState(false);
 
-    const generateMultiPageHTML = (pages: BuilderPage[], dataConnections: DataConnection) => {
+    const generateMultiPageHTML = (pages: BuilderPage[], dataConnections: DataConnection, appName: string = 'website') => {
         // No default navigation - users can add navigation templates if needed
+        // Collect loaded fonts and generate @font-face CSS for embedding
+        const gw: any = window;
+        const globalFonts = gw.globalFonts || {};
+        const fontFaceCSS = Object.keys(globalFonts)
+            .filter((name: string) => globalFonts[name] && globalFonts[name].indexOf('data:') === 0)
+            .map((name: string) => `  @font-face { font-family: "${name}"; src: url("${globalFonts[name]}"); }`)
+            .join('\n');
 
         // Generate each page content without titles
         const pagesHTML = pages.map((page, index) => {
@@ -152,7 +157,9 @@ const ExportManager: React.FC<ExportManagerProps> = ({
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Multi-Page Website - ${pages.length} Pages</title>
+    <title>${appName}</title>
+    ${fontFaceCSS ? `<style id="global-fonts">\n${fontFaceCSS}\n</style>` : ''}
+    ${pageNavScript}
     <style>
         html, body {
             margin: 0;
@@ -216,7 +223,6 @@ const ExportManager: React.FC<ExportManagerProps> = ({
 </head>
 <body>
     ${pagesHTML}
-    ${pageNavScript}
 </body>
 </html>`;
     };
@@ -225,21 +231,27 @@ const ExportManager: React.FC<ExportManagerProps> = ({
         // Keep all window data intact for JSON export so images survive round-trips.
         // The content field stores the full base64 data URL and must be preserved.
         return windows;
-    };    const handleExport = () => {
+    };
+
+    const handleExport = () => {
+        let content = '';
+        let fileName = '';
+        let mimeType = '';
+        const sanitizedAppName = appName.replace(/[^a-zA-Z0-9-_]/g, '').toLowerCase() || 'website';
+
         switch (exportFormat) {
             case 'html':
-                // Always use multi-page export now
-                const htmlCode = generateMultiPageHTML(builderPages, dataConnections);
-                downloadFile('website.html', htmlCode);
+                content = generateMultiPageHTML(builderPages, dataConnections, appName);
+                fileName = `${sanitizedAppName}.html`;
+                mimeType = 'text/html';
                 break;
             case 'js':
-                // Always use multi-page JS export
                 const allJS = builderPages.map(page => {
                     const pageJS = generateCode(page.windows, 'js', page.backgroundConfig, dataConnections);
                     return `// JavaScript for ${page.name} (${page.id})\n${pageJS}\n`;
                 }).join('\n\n');
                 
-                const combinedJS = `// Multi-Page Website JavaScript
+                content = `// Multi-Page Website JavaScript
 // Global Variables
 window.builderPages = ${JSON.stringify(builderPages.map(p => ({ id: p.id, name: p.name })))};
 window.globalVariables = ${JSON.stringify(dataConnections?.globalVariables || {})};
@@ -257,11 +269,13 @@ function showPage(pageId) {
 }
 
 ${allJS}`;
-                downloadFile('website.js', combinedJS);
+                fileName = `${sanitizedAppName}.js`;
+                mimeType = 'text/javascript';
                 break;
             case 'json':
-                // Always use multi-page format
+                const gw: any = window;
                 const exportData = {
+                    globalFonts: gw.globalFonts || {},
                     builderPages: builderPages.map(page => ({
                         ...page,
                         windows: transformWindowsForExport(page.windows)
@@ -270,9 +284,41 @@ ${allJS}`;
                     exportType: 'multi-page',
                     totalPages: builderPages.length
                 };
-                const jsonCode = JSON.stringify(exportData, null, 2);
-                downloadFile('website-config.json', jsonCode);
+                content = JSON.stringify(exportData, null, 2);
+                fileName = `${sanitizedAppName}-config.json`;
+                mimeType = 'application/json';
                 break;
+        }
+
+        // Try File System Access API first
+        const globalObj: any = globalThis;
+        if (typeof globalObj.showSaveFilePicker === 'function') {
+            const ext = fileName.split('.').pop() || '';
+            const options = {
+                suggestedName: fileName,
+                types: [{
+                    description: `${ext.toUpperCase()} Files`,
+                    accept: {
+                        [mimeType]: [`.${ext}`]
+                    }
+                }]
+            };
+
+            globalObj.showSaveFilePicker(options)
+                .then((fileHandle: any) => fileHandle.createWritable())
+                .then((writable: any) => {
+                    writable.write(content);
+                    return writable.close();
+                })
+                .catch((error: any) => {
+                    // Fallback on error or cancel
+                    if (error.name !== 'AbortError') {
+                        downloadFile(fileName, content);
+                    }
+                });
+        } else {
+            // Fallback to standard download
+            downloadFile(fileName, content);
         }
     };
 
@@ -297,7 +343,9 @@ window.globalVariables = ${JSON.stringify(dataConnections?.globalVariables || {}
 ${allJS}`;
             } else {
                 // JSON preview
+                const gw2: any = window;
                 const exportData = {
+                    globalFonts: gw2.globalFonts || {},
                     builderPages: builderPages.map(page => ({
                         ...page,
                         windows: transformWindowsForExport(page.windows)
@@ -378,6 +426,15 @@ ${allJS}`;
                     if (config.dataConnections && onDataConnectionsChange) {
                         onDataConnectionsChange(config.dataConnections);
                     }
+                    if (config.globalFonts && typeof config.globalFonts === 'object') {
+                        const gw3: any = window;
+                        gw3.globalFonts = config.globalFonts;
+                        // Immediately inject fonts into all open windows
+                        setTimeout(() => {
+                            const gw4: any = window;
+                            if (typeof gw4.__injectBuilderFonts === 'function') gw4.__injectBuilderFonts();
+                        }, 100);
+                    }
                 } else {
                     // Legacy single-page format
                     if (config.windows && Array.isArray(config.windows)) {
@@ -415,499 +472,150 @@ ${allJS}`;
             height: '100%',
             overflow: 'auto'
         }}>
-            <h2 style={{ margin: '0 0 20px 0', fontSize: '18px' }}>Configuration Manager</h2>
-
             {/* Import Section */}
-            <div style={{ marginBottom: '20px', border: '1px solid #dee2e6', borderRadius: '4px' }}>
-                <div 
-                    style={{ 
-                        padding: '12px 15px', 
-                        backgroundColor: '#f8f9fa', 
-                        borderBottom: isImportExpanded ? '1px solid #dee2e6' : 'none',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between'
-                    }}
-                    onClick={() => setIsImportExpanded(!isImportExpanded)}
-                >
-                    <h3 style={{ margin: 0, fontSize: '16px', color: '#28a745' }}>📥 Import Configuration</h3>
-                    <span style={{ fontSize: '14px' }}>{isImportExpanded ? '▼' : '▶'}</span>
+            <div style={{ marginBottom: '20px', backgroundColor: '#ffffff', borderRadius: '4px', overflow: 'hidden' }}>
+                <div style={{ padding: '15px' }}>
+                    <h3 style={{ margin: '0 0 12px 0', fontSize: '12px', color: '#555', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.4px' }}>Import</h3>
+                    <p style={{ margin: '0 0 15px 0', fontSize: '14px', color: '#6c757d' }}>
+                        Import a previously exported JSON configuration file to restore windows, background settings, and data connections.
+                    </p>
+                    
+                    <input
+                        type="file"
+                        accept=".json,application/json"
+                        onChange={handleImport}
+                        style={{
+                            width: '100%',
+                            padding: '8px',
+                            border: '1px solid #dee2e6',
+                            borderRadius: '4px',
+                            fontSize: '14px',
+                            cursor: 'pointer'
+                        }}
+                    />
+                    <div style={{ 
+                        marginTop: '10px', 
+                        padding: '10px', 
+                        backgroundColor: '#fff3cd', 
+                        borderRadius: '4px',
+                        fontSize: '12px',
+                        color: '#856404'
+                    }}>
+                        ⚠️ Importing will replace your current configuration. Make sure to export your current work first!
+                    </div>
                 </div>
-                
-                {isImportExpanded && (
-                    <div style={{ padding: '15px' }}>
-                        <p style={{ margin: '0 0 15px 0', fontSize: '14px', color: '#6c757d' }}>
-                            Import a previously exported JSON configuration file to restore windows, background settings, and data connections.
+            </div>
+
+            {/* Export Section */}
+            <div style={{ marginBottom: '20px', backgroundColor: '#ffffff', borderRadius: '4px', overflow: 'hidden' }}>
+                <div style={{ padding: '15px' }}>
+                    <h3 style={{ margin: '0 0 12px 0', fontSize: '12px', color: '#555', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.4px' }}>Export</h3>
+                    <label style={{ 
+                        display: 'block', 
+                        marginBottom: '8px', 
+                        fontSize: '14px', 
+                        fontWeight: 'bold' 
+                    }}>
+                        Export Format:
+                    </label>
+                    <select 
+                        value={exportFormat}
+                        onChange={(e) => {
+                            const value = e.target.value;
+                            if (value === 'html' || value === 'js' || value === 'json') {
+                                setExportFormat(value);
+                            }
+                        }}
+                        style={{
+                            width: '100%',
+                            padding: '8px',
+                            border: '1px solid #dee2e6',
+                            borderRadius: '4px',
+                            fontSize: '14px',
+                            marginBottom: '15px'
+                        }}
+                    >
+                        <option value="html">
+                            Complete HTML
+                        </option>
+                        <option value="js">
+                            Javascript Only
+                        </option>
+                        <option value="json">
+                            JSON Configuration
+                        </option>
+                    </select>
+
+                    <button 
+                        onClick={handleExport}
+                        disabled={windows.length === 0}
+                        style={{
+                            width: '100%',
+                            padding: '12px',
+                            backgroundColor: windows.length === 0 ? '#6c757d' : '#28a745',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            cursor: windows.length === 0 ? 'not-allowed' : 'pointer',
+                            fontSize: '14px',
+                            fontWeight: 'bold',
+                            marginBottom: '10px'
+                        }}
+                    >
+                        Download {exportFormat.toUpperCase()}
+                    </button>
+                    
+                    <button 
+                        onClick={previewCode}
+                        disabled={windows.length === 0}
+                        style={{
+                            width: '100%',
+                            padding: '8px',
+                            backgroundColor: windows.length === 0 ? '#6c757d' : '#007bff',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            cursor: windows.length === 0 ? 'not-allowed' : 'pointer',
+                            fontSize: '12px'
+                        }}
+                    >
+                        Preview Code
+                    </button>
+
+                    <div style={{ 
+                        marginTop: '15px',
+                        padding: '15px', 
+                        backgroundColor: '#f8f9fa', 
+                        borderRadius: '4px',
+                        fontSize: '12px'
+                    }}>
+                        <h4 style={{ margin: '0 0 10px 0', fontSize: '14px' }}>Export Info:</h4>
+                        <p style={{ margin: '5px 0' }}>Windows: {windows.length}</p>
+                        <p style={{ margin: '5px 0' }}>
+                            JavaScript Windows: {windows.filter(w => w.type === 'javascript').length}
                         </p>
-                        
-                        <input
-                            type="file"
-                            accept=".json,application/json"
-                            onChange={handleImport}
-                            style={{
-                                width: '100%',
-                                padding: '8px',
-                                border: '1px solid #dee2e6',
-                                borderRadius: '4px',
-                                fontSize: '14px',
-                                cursor: 'pointer'
-                            }}
-                        />
-                        
+                        <p style={{ margin: '5px 0' }}>
+                            HTML Windows: {windows.filter(w => w.type === 'html').length}
+                        </p>
+                        <p style={{ margin: '5px 0' }}>
+                            Visualization Windows: {windows.filter(w => w.type === 'visualization').length}
+                        </p>
+                    </div>
+
+                    {windows.length === 0 && (
                         <div style={{ 
-                            marginTop: '10px', 
-                            padding: '10px', 
+                            marginTop: '15px', 
+                            padding: '15px', 
                             backgroundColor: '#fff3cd', 
                             borderRadius: '4px',
                             fontSize: '12px',
                             color: '#856404'
                         }}>
-                            ⚠️ Importing will replace your current configuration. Make sure to export your current work first!
-                        </div>
-                    </div>
-                )}
-            </div>
-
-            {/* Export Section */}
-            <div style={{ marginBottom: '20px', border: '1px solid #dee2e6', borderRadius: '4px' }}>
-                <div 
-                    style={{ 
-                        padding: '12px 15px', 
-                        backgroundColor: '#f8f9fa', 
-                        borderBottom: isExportExpanded ? '1px solid #dee2e6' : 'none',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between'
-                    }}
-                    onClick={() => setIsExportExpanded(!isExportExpanded)}
-                >
-                    <div>
-                        <h3 style={{ margin: 0, fontSize: '16px', color: '#0066cc' }}>📤 Export Configuration</h3>
-                    </div>
-                    <span style={{ fontSize: '14px' }}>{isExportExpanded ? '▼' : '▶'}</span>
-                </div>
-                
-                {isExportExpanded && (
-                    <div style={{ padding: '15px' }}>
-            
-            {/* Background Configuration */}
-            <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f8f9fa', borderRadius: '4px' }}>
-                <h4 style={{ margin: '0 0 15px 0', fontSize: '14px', color: '#495057' }}>Background Settings</h4>
-                
-                <div style={{ marginBottom: '10px' }}>
-                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', fontWeight: 'bold' }}>
-                        Width (px):
-                    </label>
-                    <input
-                        type="number"
-                        value={backgroundConfig.width}
-                        onChange={(e) => onBackgroundConfigChange({
-                            ...backgroundConfig,
-                            width: parseInt(e.target.value) || 1200
-                        })}
-                        style={{
-                            width: '100%',
-                            padding: '4px 8px',
-                            border: '1px solid #dee2e6',
-                            borderRadius: '4px',
-                            fontSize: '12px'
-                        }}
-                    />
-                </div>
-                
-                <div style={{ marginBottom: '10px' }}>
-                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', fontWeight: 'bold' }}>
-                        Height (px):
-                    </label>
-                    <input
-                        type="number"
-                        value={backgroundConfig.height}
-                        onChange={(e) => onBackgroundConfigChange({
-                            ...backgroundConfig,
-                            height: parseInt(e.target.value) || 800
-                        })}
-                        style={{
-                            width: '100%',
-                            padding: '4px 8px',
-                            border: '1px solid #dee2e6',
-                            borderRadius: '4px',
-                            fontSize: '12px'
-                        }}
-                    />
-                </div>
-                
-                <div style={{ marginBottom: '0' }}>
-                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', fontWeight: 'bold' }}>
-                        Background Color:
-                    </label>
-                    <input
-                        type="color"
-                        value={backgroundConfig.color}
-                        onChange={(e) => onBackgroundConfigChange({
-                            ...backgroundConfig,
-                            color: e.target.value
-                        })}
-                        style={{
-                            width: '100%',
-                            height: '32px',
-                            border: '1px solid #dee2e6',
-                            borderRadius: '4px',
-                            cursor: 'pointer'
-                        }}
-                    />
-                </div>
-            </div>
-
-
-            
-            <div style={{ marginBottom: '20px' }}>
-                <label style={{ 
-                    display: 'block', 
-                    marginBottom: '8px', 
-                    fontSize: '14px', 
-                    fontWeight: 'bold' 
-                }}>
-                    Export Format:
-                </label>
-                <select 
-                    value={exportFormat}
-                    onChange={(e) => {
-                        const value = e.target.value;
-                        if (value === 'html' || value === 'js' || value === 'json') {
-                            setExportFormat(value);
-                        }
-                    }}
-                    style={{
-                        width: '100%',
-                        padding: '8px',
-                        border: '1px solid #dee2e6',
-                        borderRadius: '4px',
-                        fontSize: '14px'
-                    }}
-                >
-                    <option value="html">
-                        Complete HTML
-                    </option>
-                    <option value="js">
-                        Javascript Only
-                    </option>
-                    <option value="json">
-                        JSON Configuration
-                    </option>
-                </select>
-            </div>
-
-            <div style={{ marginBottom: '20px' }}>
-                <button 
-                    onClick={handleExport}
-                    disabled={windows.length === 0}
-                    style={{
-                        width: '100%',
-                        padding: '12px',
-                        backgroundColor: windows.length === 0 ? '#6c757d' : '#28a745',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: windows.length === 0 ? 'not-allowed' : 'pointer',
-                        fontSize: '14px',
-                        fontWeight: 'bold',
-                        marginBottom: '10px'
-                    }}
-                >
-                    Download {exportFormat.toUpperCase()}
-                </button>
-                
-                <button 
-                    onClick={previewCode}
-                    disabled={windows.length === 0}
-                    style={{
-                        width: '100%',
-                        padding: '8px',
-                        backgroundColor: windows.length === 0 ? '#6c757d' : '#007bff',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: windows.length === 0 ? 'not-allowed' : 'pointer',
-                        fontSize: '12px'
-                    }}
-                >
-                    Preview Code
-                </button>
-            </div>
-
-            <div style={{ 
-                padding: '15px', 
-                backgroundColor: '#f8f9fa', 
-                borderRadius: '4px',
-                fontSize: '12px'
-            }}>
-                <h4 style={{ margin: '0 0 10px 0', fontSize: '14px' }}>Export Info:</h4>
-                <p style={{ margin: '5px 0' }}>Windows: {windows.length}</p>
-                <p style={{ margin: '5px 0' }}>
-                    JavaScript Windows: {windows.filter(w => w.type === 'javascript').length}
-                </p>
-                <p style={{ margin: '5px 0' }}>
-                    HTML Windows: {windows.filter(w => w.type === 'html').length}
-                </p>
-                <p style={{ margin: '5px 0' }}>
-                    Visualization Windows: {windows.filter(w => w.type === 'visualization').length}
-                </p>
-            </div>
-
-                        {windows.length === 0 && (
-                            <div style={{ 
-                                marginTop: '20px', 
-                                padding: '15px', 
-                                backgroundColor: '#fff3cd', 
-                                borderRadius: '4px',
-                                fontSize: '12px',
-                                color: '#856404'
-                            }}>
-                                ⚠️ Add some windows to your canvas before exporting
-                            </div>
-                        )}
-                    </div>
-                )}
-            </div>
-
-            {/* Global Variables Section */}
-            <div style={{ marginBottom: '20px', border: '1px solid #dee2e6', borderRadius: '4px' }}>
-                <div 
-                    style={{ 
-                        padding: '12px 15px', 
-                        backgroundColor: '#f8f9fa', 
-                        borderBottom: isGlobalVariablesExpanded ? '1px solid #dee2e6' : 'none',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between'
-                    }}
-                    onClick={() => setIsGlobalVariablesExpanded(!isGlobalVariablesExpanded)}
-                >
-                    <h3 style={{ margin: 0, fontSize: '16px', color: '#6f42c1' }}>🌐 Global Variables</h3>
-                    <span style={{ fontSize: '14px' }}>{isGlobalVariablesExpanded ? '▼' : '▶'}</span>
-                </div>
-                
-                {isGlobalVariablesExpanded && (
-                    <div style={{ padding: '15px' }}>
-                        <p style={{ margin: '0 0 15px 0', fontSize: '14px', color: '#6c757d' }}>
-                            View and reference your global variables for API connections and data management.
-                        </p>
-                        
-                        {dataConnections.apiConnections.length > 0 ? (
-                            <div>
-                                {/* API Connections and their Variables */}
-                                {dataConnections.apiConnections.map(api => (
-                                    <div key={api.id} style={{ 
-                                        marginBottom: '20px', 
-                                        padding: '15px', 
-                                        backgroundColor: '#f0f8ff', 
-                                        borderRadius: '4px', 
-                                        border: '1px solid #b3d9ff' 
-                                    }}>
-                                        <div style={{ fontSize: '12px', fontWeight: 'bold', color: '#6f42c1', marginBottom: '8px' }}>
-                                            API: {api.name} ({api.method})
-                                        </div>
-                                        <div style={{ 
-                                            fontSize: '11px', 
-                                            fontFamily: 'Monaco, Consolas, "Lucida Console", monospace', 
-                                            backgroundColor: '#ffffff', 
-                                            padding: '8px', 
-                                            borderRadius: '3px', 
-                                            border: '1px solid #dee2e6',
-                                            marginBottom: '8px'
-                                        }}>
-                                            <div style={{ marginBottom: '4px', color: '#28a745' }}>
-                                                // Call this API:<br/>
-                                                <strong>await fetch{api.name.replace(/[^a-zA-Z0-9]/g, '')}()</strong>
-                                            </div>
-                                            {api.variables.length > 0 && (
-                                                <>
-                                                    <div style={{ marginBottom: '2px', color: '#6c757d' }}>// Available variables:</div>
-                                                    {api.variables.map(variable => (
-                                                        <div key={variable.id} style={{ color: '#dc3545' }}>
-                                                            <strong>{variable.name}</strong> ({variable.type})
-                                                            {variable.description && <span style={{ color: '#6c757d' }}> - {variable.description}</span>}
-                                                        </div>
-                                                    ))}
-                                                </>
-                                            )}
-                                        </div>
-                                    </div>
-                                ))}
-                                
-                                {/* Current Global Variables Values */}
-                                {Object.keys(dataConnections.globalVariables).length > 0 && (
-                                    <div style={{ 
-                                        backgroundColor: '#f8f9fa', 
-                                        border: '1px solid #dee2e6',
-                                        borderRadius: '4px',
-                                        padding: '12px',
-                                        marginBottom: '15px'
-                                    }}>
-                                        <h4 style={{ margin: '0 0 10px 0', fontSize: '12px', fontWeight: 'bold', color: '#495057' }}>
-                                            Current Variable Values:
-                                        </h4>
-                                        {Object.entries(dataConnections.globalVariables).map(([key, value]) => (
-                                            <div key={key} style={{ 
-                                                margin: '8px 0',
-                                                padding: '8px',
-                                                backgroundColor: '#ffffff',
-                                                border: '1px solid #e9ecef',
-                                                borderRadius: '3px',
-                                                fontSize: '11px',
-                                                fontFamily: 'Monaco, Consolas, "Lucida Console", monospace'
-                                            }}>
-                                                <div style={{ color: '#007bff', fontWeight: 'bold' }}>
-                                                    {key}:
-                                                </div>
-                                                <div style={{ color: '#28a745', marginTop: '2px' }}>
-                                                    {String(value)}
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                                
-                                <div style={{ 
-                                    padding: '10px', 
-                                    backgroundColor: '#e7f3ff', 
-                                    borderRadius: '4px',
-                                    fontSize: '11px',
-                                    color: '#0c5460'
-                                }}>
-                                    💡 <strong>Usage Tips:</strong><br/>
-                                    • Use these variables in your JavaScript and HTML windows after calling the API functions<br/>
-                                    • Reference them as <code style={{ backgroundColor: '#fff', padding: '1px 4px', borderRadius: '2px' }}>variableName</code> in your code<br/>
-                                    • Variables are updated automatically when API calls succeed
-                                </div>
-                            </div>
-                        ) : (
-                            <div style={{ 
-                                padding: '20px', 
-                                backgroundColor: '#f8f9fa', 
-                                borderRadius: '4px',
-                                textAlign: 'center',
-                                fontSize: '12px',
-                                color: '#6c757d'
-                            }}>
-                                <div style={{ fontSize: '24px', marginBottom: '10px' }}>📊</div>
-                                <div style={{ fontWeight: 'bold', marginBottom: '5px' }}>No Global Variables</div>
-                                <div>Configure API connections in the Data Connections tab to create global variables</div>
-                            </div>
-                        )}
-                    </div>
-                )}
-            </div>
-
-            {/* Page Functions Section */}
-            {builderPages.length > 0 && (
-                <div style={{ marginBottom: '20px', border: '1px solid #dee2e6', borderRadius: '4px' }}>
-                    <div 
-                        style={{ 
-                            padding: '12px 15px', 
-                            backgroundColor: '#f8f9fa', 
-                            borderBottom: isPageFunctionsExpanded ? '1px solid #dee2e6' : 'none',
-                            cursor: 'pointer',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between'
-                        }}
-                        onClick={() => setIsPageFunctionsExpanded(!isPageFunctionsExpanded)}
-                    >
-                        <h3 style={{ margin: 0, fontSize: '16px', color: '#dc3545' }}>🔧 Page Functions</h3>
-                        <span style={{ fontSize: '14px' }}>{isPageFunctionsExpanded ? '▼' : '▶'}</span>
-                    </div>
-                    
-                    {isPageFunctionsExpanded && (
-                        <div style={{ padding: '15px' }}>
-                            <p style={{ margin: '0 0 15px 0', fontSize: '14px', color: '#6c757d' }}>
-                                Each page has a dedicated function that can be called to navigate to it. Use these functions in your JavaScript code or templates.
-                            </p>
-                            
-                            <div style={{ 
-                                marginBottom: '15px',
-                                padding: '12px',
-                                backgroundColor: '#fff3cd',
-                                borderRadius: '4px',
-                                fontSize: '12px',
-                                color: '#856404'
-                            }}>
-                                💡 <strong>Usage:</strong> Call any of these functions from JavaScript code, buttons, or navigation templates to switch pages.
-                            </div>
-                            
-                            {builderPages.map(page => {
-                                const functionName = `goTo${page.name.replace(/[^a-zA-Z0-9]/g, '')}`;
-                                return (
-                                    <div key={page.id} style={{ 
-                                        margin: '8px 0',
-                                        padding: '12px',
-                                        backgroundColor: '#ffffff',
-                                        border: '1px solid #e9ecef',
-                                        borderRadius: '4px',
-                                        fontSize: '12px'
-                                    }}>
-                                        <div style={{ 
-                                            display: 'flex', 
-                                            alignItems: 'center', 
-                                            justifyContent: 'space-between',
-                                            marginBottom: '8px'
-                                        }}>
-                                            <div style={{ fontWeight: 'bold', color: '#495057' }}>
-                                                📄 {page.name}
-                                            </div>
-                                            <div style={{ 
-                                                fontSize: '10px',
-                                                color: '#6c757d',
-                                                fontFamily: 'Monaco, Consolas, monospace',
-                                                backgroundColor: '#f8f9fa',
-                                                padding: '2px 6px',
-                                                borderRadius: '3px'
-                                            }}>
-                                                ID: {page.id}
-                                            </div>
-                                        </div>
-                                        <div style={{ 
-                                            fontFamily: 'Monaco, Consolas, "Lucida Console", monospace',
-                                            backgroundColor: '#f8f9fa',
-                                            padding: '8px',
-                                            borderRadius: '3px',
-                                            color: '#dc3545',
-                                            fontWeight: 'bold'
-                                        }}>
-                                            {functionName}()
-                                        </div>
-                                        <div style={{ 
-                                            marginTop: '6px',
-                                            fontSize: '11px',
-                                            color: '#6c757d'
-                                        }}>
-                                            Example: <code style={{ backgroundColor: '#f8f9fa', padding: '1px 4px', borderRadius: '2px' }}>
-                                                onclick="{functionName}()"
-                                            </code>
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                            
-                            <div style={{ 
-                                marginTop: '15px',
-                                padding: '12px',
-                                backgroundColor: '#e7f3ff', 
-                                borderRadius: '4px',
-                                fontSize: '11px',
-                                color: '#0c5460'
-                            }}>
-                                <strong>Also Available:</strong><br/>
-                                • <code style={{ backgroundColor: '#fff', padding: '1px 4px', borderRadius: '2px' }}>showPage(pageId)</code> - Generic function that takes a page ID<br/>
-                                • Functions are available in exported HTML and can be used in navigation templates
-                            </div>
+                            ⚠️ Add some windows to your canvas before exporting
                         </div>
                     )}
                 </div>
-            )}
+            </div>
         </div>
     );
 };

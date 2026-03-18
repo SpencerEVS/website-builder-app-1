@@ -15,6 +15,33 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
   onBuilderPagesChange
 }) => {
   const [selectedWindow, setSelectedWindow] = useState<string | null>(null);
+  const [isEditorFullscreen, setIsEditorFullscreen] = useState<boolean>(false);
+  const [editorWidth, setEditorWidth] = useState<number>(380);
+  const isDraggingRef = useRef(false);
+  const startXRef = useRef(0);
+  const startWidthRef = useRef(380);
+
+  const handleDragStart = (e: React.MouseEvent) => {
+    isDraggingRef.current = true;
+    startXRef.current = e.clientX;
+    startWidthRef.current = editorWidth;
+    e.preventDefault();
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDraggingRef.current) return;
+      const delta = startXRef.current - e.clientX;
+      setEditorWidth(Math.max(200, Math.min(900, startWidthRef.current + delta)));
+    };
+    const handleMouseUp = () => { isDraggingRef.current = false; };
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
 
   // Helper functions with memoization
   const getCurrentBuilderPage = useMemo((): BuilderPage => {
@@ -150,21 +177,52 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
 
       {/* Right Panel - Code Editor */}
       <div style={{
-        width: '380px',
+        width: `${editorWidth}px`,
         backgroundColor: '#ffffff',
         display: 'flex',
         flexDirection: 'column',
-        borderLeft: '1px solid #dee2e6'
+        borderLeft: '1px solid #dee2e6',
+        position: 'relative',
+        flexShrink: 0
       }}>
+        {/* Drag-to-resize handle */}
+        <div
+          onMouseDown={handleDragStart}
+          style={{
+            position: 'absolute', left: 0, top: 0, bottom: 0, width: '5px',
+            cursor: 'ew-resize', zIndex: 10, backgroundColor: 'transparent',
+            transition: 'background-color 0.15s'
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#0066cc44'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+        />
         <div style={{
           padding: '8px 12px',
           backgroundColor: '#f8f9fa',
           borderBottom: '1px solid #dee2e6',
           fontSize: '12px',
           fontWeight: '500',
-          color: '#495057'
+          color: '#495057',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between'
         }}>
-          Code Editor
+          <span>Code Editor</span>
+          {selectedWindowData && (
+            <button
+              onClick={() => setIsEditorFullscreen(true)}
+              title="Expand editor"
+              style={{
+                padding: '2px 7px',
+                fontSize: '11px',
+                backgroundColor: '#ffffff',
+                color: '#495057',
+                border: '1px solid #ced4da',
+                borderRadius: '3px',
+                cursor: 'pointer'
+              }}
+            >&#x26F6; Expand</button>
+          )}
         </div>
         
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -172,16 +230,21 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
             <textarea
               value={selectedWindowData.type === 'html' ? (selectedWindowData.content || '') : (selectedWindowData.jsCode || '')}
               onChange={(e) => handleCodeChange(e.target.value)}
+              spellCheck={false}
+              autoCorrect="off"
+              autoCapitalize="off"
+              autoComplete="off"
               style={{
                 flex: 1,
                 border: 'none',
                 padding: '12px',
                 fontSize: '12px',
-                fontFamily: '"Courier New", monospace',
+                fontFamily: "Monaco, Consolas, 'Courier New', monospace",
                 backgroundColor: '#ffffff',
-                color: '#495057',
+                color: '#212529',
                 resize: 'none',
-                outline: 'none'
+                outline: 'none',
+                lineHeight: '1.5'
               }}
             />
           ) : (
@@ -198,6 +261,47 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
           )}
         </div>
       </div>
+
+      {/* Fullscreen code editor overlay */}
+      {isEditorFullscreen && selectedWindowData && (
+        <div
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            backgroundColor: '#ffffff', zIndex: 99999,
+            display: 'flex', flexDirection: 'column'
+          }}
+        >
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '8px 14px', backgroundColor: '#f8f9fa',
+            borderBottom: '1px solid #dee2e6', flexShrink: 0
+          }}>
+            <span style={{ color: '#495057', fontSize: '13px', fontFamily: "Monaco, Consolas, 'Courier New', monospace" }}>
+              {selectedWindowData.title}
+            </span>
+            <button
+              onClick={() => setIsEditorFullscreen(false)}
+              style={{ padding: '4px 12px', fontSize: '12px', backgroundColor: '#ffffff', color: '#495057', border: '1px solid #ced4da', borderRadius: '3px', cursor: 'pointer' }}
+            >&#x2715; Close</button>
+          </div>
+          <textarea
+            value={selectedWindowData.type === 'html' ? (selectedWindowData.content || '') : (selectedWindowData.jsCode || '')}
+            onChange={(e) => handleCodeChange(e.target.value)}
+            spellCheck={false}
+            autoCorrect="off"
+            autoCapitalize="off"
+            autoComplete="off"
+            autoFocus
+            style={{
+              flex: 1, width: '100%',
+              fontFamily: "Monaco, Consolas, 'Courier New', monospace",
+              fontSize: '13px', backgroundColor: '#ffffff', color: '#212529',
+              border: 'none', padding: '12px 16px',
+              resize: 'none', outline: 'none', lineHeight: '1.6', boxSizing: 'border-box'
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 };
@@ -329,9 +433,11 @@ const JavaScriptWindowRenderer: React.FC<{
           });
         } catch (e) {}
 
-        // Execute the code
-        const globalVarNames = Object.keys(dataConnections.globalVariables);
-        const globalVarValues = Object.values(dataConnections.globalVariables);
+        // Execute the code — only valid JS identifier names can be spread as named params
+        const isValidIdentifier = (n: string) => /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(n);
+        const globalVarEntries = Object.entries(dataConnections.globalVariables).filter(([k]) => isValidIdentifier(k));
+        const globalVarNames = globalVarEntries.map(([k]) => k);
+        const globalVarValues = globalVarEntries.map(([, v]) => v);
         const apiVarNames: string[] = [];
         const apiVarValues: any[] = [];
 

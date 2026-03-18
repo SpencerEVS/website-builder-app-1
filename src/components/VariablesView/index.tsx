@@ -8,7 +8,7 @@ interface VariablesViewProps {
 
 const VariablesView: React.FC<VariablesViewProps> = ({ dataConnections, onDataConnectionsChange }) => {
   const [searchTerm, setSearchTerm] = useState('');
-  const [filterType, setFilterType] = useState<'all' | 'api' | 'global'>('all');
+  const [filterType, setFilterType] = useState<'all' | 'global'>('all');
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [newVariable, setNewVariable] = useState<{
     name: string;
@@ -21,8 +21,13 @@ const VariablesView: React.FC<VariablesViewProps> = ({ dataConnections, onDataCo
     value: '',
     description: ''
   });
+  const [editingVariable, setEditingVariable] = useState<{
+    originalName: string;
+    name: string;
+    value: string;
+  } | null>(null);
 
-  // Collect all variables from API connections
+  // Collect all variables from API connections (kept for reference but hidden from display)
   const apiVariables = dataConnections.apiConnections.flatMap(connection => 
     connection.variables.map(variable => ({
       ...variable,
@@ -35,6 +40,11 @@ const VariablesView: React.FC<VariablesViewProps> = ({ dataConnections, onDataCo
     }))
   );
 
+  // Get set of API variable names for description labeling
+  const apiVariableNames = new Set(
+    dataConnections.apiConnections.flatMap(conn => conn.variables.map(v => v.name))
+  );
+
   // Convert global variables to display format
   const globalVariables = Object.entries(dataConnections.globalVariables).map(([key, value]) => ({
     id: `global-${key}`,
@@ -43,11 +53,11 @@ const VariablesView: React.FC<VariablesViewProps> = ({ dataConnections, onDataCo
     value: value,
     source: 'Global',
     sourceType: 'global',
-    description: 'Global variable'
+    description: apiVariableNames.has(key) ? 'Global variable (from api)' : 'Global variable'
   }));
 
-  // Combine and filter variables
-  const allVariables = [...apiVariables, ...globalVariables];
+  // Combine and filter variables - only show globalVariables (API definitions are redundant)
+  const allVariables = [...globalVariables];
   const filteredVariables = allVariables.filter(variable => {
     const matchesSearch = variable.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
                          variable.source.toLowerCase().includes(searchTerm.toLowerCase());
@@ -110,6 +120,59 @@ const VariablesView: React.FC<VariablesViewProps> = ({ dataConnections, onDataCo
         [variableName]: newValue
       }
     });
+  };
+
+  const handleStartEdit = (name: string, value: any) => {
+    setEditingVariable({
+      originalName: name,
+      name: name,
+      value: String(value)
+    });
+  };
+
+  const handleSaveEdit = () => {
+    if (!editingVariable || !editingVariable.name.trim()) return;
+    const entries = Object.entries(dataConnections.globalVariables);
+    const idx = entries.findIndex(([k]) => k === editingVariable.originalName);
+    if (idx === -1) { setEditingVariable(null); return; }
+
+    // Parse value to match original type
+    const originalValue = entries[idx][1];
+    let parsedValue: any = editingVariable.value;
+    if (typeof originalValue === 'number') {
+      parsedValue = parseFloat(editingVariable.value);
+      if (isNaN(parsedValue)) parsedValue = 0;
+    } else if (typeof originalValue === 'boolean') {
+      parsedValue = editingVariable.value.toLowerCase() === 'true';
+    }
+
+    // Rebuild object preserving order, replacing the entry
+    const newEntries: [string, any][] = entries.map(([k, v], i) =>
+      i === idx ? [editingVariable.name.trim(), parsedValue] : [k, v]
+    );
+    const newGlobals: Record<string, any> = {};
+    newEntries.forEach(([k, v]) => { newGlobals[k] = v; });
+    onDataConnectionsChange({ ...dataConnections, globalVariables: newGlobals });
+    setEditingVariable(null);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingVariable(null);
+  };
+
+  const handleMoveVariable = (name: string, direction: 'up' | 'down') => {
+    const entries = Object.entries(dataConnections.globalVariables);
+    const idx = entries.findIndex(([k]) => k === name);
+    if (idx === -1) return;
+    const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (swapIdx < 0 || swapIdx >= entries.length) return;
+    const newEntries = [...entries];
+    const temp = newEntries[idx];
+    newEntries[idx] = newEntries[swapIdx];
+    newEntries[swapIdx] = temp;
+    const newGlobals: Record<string, any> = {};
+    newEntries.forEach(([k, v]) => { newGlobals[k] = v; });
+    onDataConnectionsChange({ ...dataConnections, globalVariables: newGlobals });
   };
 
   return (
@@ -176,7 +239,6 @@ const VariablesView: React.FC<VariablesViewProps> = ({ dataConnections, onDataCo
           }}
         >
           <option value="all">All Variables ({allVariables.length})</option>
-          <option value="api">API Variables ({apiVariables.length})</option>
           <option value="global">Global Variables ({globalVariables.length})</option>
         </select>
         
@@ -376,7 +438,7 @@ const VariablesView: React.FC<VariablesViewProps> = ({ dataConnections, onDataCo
           {/* Table Header */}
           <div style={{
             display: 'grid',
-            gridTemplateColumns: '40px 200px 100px 150px 1fr 100px 100px',
+            gridTemplateColumns: '40px 220px 100px 150px 1fr 120px 160px',
             backgroundColor: '#f8f9fa',
             padding: '12px',
             borderBottom: '1px solid #dee2e6',
@@ -394,92 +456,210 @@ const VariablesView: React.FC<VariablesViewProps> = ({ dataConnections, onDataCo
           </div>
 
           {/* Table Body */}
-          {filteredVariables.map((variable, index) => (
-            <div
-              key={variable.id}
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '40px 200px 100px 150px 1fr 100px 100px',
-                padding: '12px',
-                borderBottom: index < filteredVariables.length - 1 ? '1px solid #dee2e6' : 'none',
-                backgroundColor: index % 2 === 0 ? '#ffffff' : '#f8f9fa',
-                fontSize: '13px',
-                alignItems: 'center'
-              }}
-            >
-              <div style={{ textAlign: 'center' }}>
-                {getVariableStatusIcon(variable)}
+          {filteredVariables.map((variable, index) => {
+            const isEditing = editingVariable !== null && editingVariable.originalName === variable.name && variable.sourceType === 'global';
+            const ev = editingVariable || { originalName: '', name: '', value: '' };
+            const globalEntries = Object.entries(dataConnections.globalVariables);
+            const globalIdx = variable.sourceType === 'global' ? globalEntries.findIndex(([k]) => k === variable.name) : -1;
+            const isFirst = globalIdx === 0;
+            const isLast = globalIdx === globalEntries.length - 1;
+            return (
+              <div
+                key={variable.id}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '40px 220px 100px 150px 1fr 120px 160px',
+                  padding: '8px 12px',
+                  borderBottom: index < filteredVariables.length - 1 ? '1px solid #dee2e6' : 'none',
+                  backgroundColor: isEditing ? '#fffbea' : index % 2 === 0 ? '#ffffff' : '#f8f9fa',
+                  fontSize: '13px',
+                  alignItems: 'center',
+                  gap: '0'
+                }}
+              >
+                <div style={{ textAlign: 'center' }}>
+                  {getVariableStatusIcon(variable)}
+                </div>
+
+                {/* Name cell */}
+                <div style={{ fontWeight: 'bold', color: '#333', wordBreak: 'break-word', paddingRight: '6px' }}>
+                  {isEditing ? (
+                    <input
+                      type="text"
+                      value={ev.name}
+                      onChange={(e) => setEditingVariable({ ...ev, name: e.target.value })}
+                      style={{
+                        width: '100%',
+                        padding: '4px 6px',
+                        border: '1px solid #007bff',
+                        borderRadius: '3px',
+                        fontSize: '13px',
+                        fontWeight: 'bold'
+                      }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleSaveEdit(); if (e.key === 'Escape') handleCancelEdit(); }}
+                      autoFocus
+                    />
+                  ) : variable.name}
+                </div>
+
+                <div>
+                  <span style={{
+                    backgroundColor: getVariableTypeColor(variable.type),
+                    color: 'white',
+                    padding: '2px 6px',
+                    borderRadius: '12px',
+                    fontSize: '10px',
+                    fontWeight: 'bold'
+                  }}>
+                    {variable.type.toUpperCase()}
+                  </span>
+                </div>
+
+                <div style={{ color: '#6c757d' }}>
+                  {variable.source}
+                </div>
+
+                <div style={{ color: '#6c757d', fontSize: '12px', wordBreak: 'break-word' }}>
+                  {'jsonPath' in variable ? variable.jsonPath : variable.description || '-'}
+                </div>
+
+                {/* Value cell */}
+                <div style={{ fontSize: '12px', color: '#495057', paddingRight: '6px' }}>
+                  {isEditing ? (
+                    <input
+                      type="text"
+                      value={ev.value}
+                      onChange={(e) => setEditingVariable({ ...ev, value: e.target.value })}
+                      style={{
+                        width: '100%',
+                        padding: '4px 6px',
+                        border: '1px solid #007bff',
+                        borderRadius: '3px',
+                        fontSize: '13px'
+                      }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleSaveEdit(); if (e.key === 'Escape') handleCancelEdit(); }}
+                    />
+                  ) : (
+                    <span style={{ maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>
+                      {'value' in variable ?
+                        (typeof variable.value === 'object' ?
+                          JSON.stringify(variable.value).substring(0, 20) + '...' :
+                          String(variable.value)
+                        ) :
+                        'Runtime'
+                      }
+                    </span>
+                  )}
+                </div>
+
+                {/* Actions cell */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'nowrap' }}>
+                  {variable.sourceType === 'global' && (
+                    isEditing ? (
+                      <>
+                        <button
+                          onClick={handleSaveEdit}
+                          title="Save changes"
+                          style={{
+                            padding: '4px 8px',
+                            backgroundColor: '#28a745',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            fontSize: '11px',
+                            fontWeight: '600',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          Save
+                        </button>
+                        <button
+                          onClick={handleCancelEdit}
+                          title="Cancel"
+                          style={{
+                            padding: '4px 8px',
+                            backgroundColor: '#6c757d',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            fontSize: '11px',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => handleStartEdit(variable.name, 'value' in variable ? variable.value : '')}
+                          title="Edit name and value"
+                          style={{
+                            padding: '4px 7px',
+                            backgroundColor: '#007bff',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            fontSize: '12px',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          ✏️
+                        </button>
+                        <button
+                          onClick={() => handleMoveVariable(variable.name, 'up')}
+                          disabled={isFirst}
+                          title="Move up"
+                          style={{
+                            padding: '4px 6px',
+                            backgroundColor: isFirst ? '#e9ecef' : '#6c757d',
+                            color: isFirst ? '#adb5bd' : 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            fontSize: '11px',
+                            cursor: isFirst ? 'not-allowed' : 'pointer'
+                          }}
+                        >
+                          ▲
+                        </button>
+                        <button
+                          onClick={() => handleMoveVariable(variable.name, 'down')}
+                          disabled={isLast}
+                          title="Move down"
+                          style={{
+                            padding: '4px 6px',
+                            backgroundColor: isLast ? '#e9ecef' : '#6c757d',
+                            color: isLast ? '#adb5bd' : 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            fontSize: '11px',
+                            cursor: isLast ? 'not-allowed' : 'pointer'
+                          }}
+                        >
+                          ▼
+                        </button>
+                        <button
+                          onClick={() => handleDeleteVariable(variable.name)}
+                          title="Delete variable"
+                          style={{
+                            padding: '4px 7px',
+                            backgroundColor: '#dc3545',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            fontSize: '12px',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          🗑️
+                        </button>
+                      </>
+                    )
+                  )}
+                </div>
               </div>
-              <div style={{ 
-                fontWeight: 'bold',
-                color: '#333',
-                wordBreak: 'break-word'
-              }}>
-                {variable.name}
-              </div>
-              <div>
-                <span style={{
-                  backgroundColor: getVariableTypeColor(variable.type),
-                  color: 'white',
-                  padding: '2px 6px',
-                  borderRadius: '12px',
-                  fontSize: '10px',
-                  fontWeight: 'bold'
-                }}>
-                  {variable.type.toUpperCase()}
-                </span>
-              </div>
-              <div style={{ color: '#6c757d' }}>
-                {variable.source}
-              </div>
-              <div style={{ 
-                color: '#6c757d',
-                fontSize: '12px',
-                wordBreak: 'break-word'
-              }}>
-                {'jsonPath' in variable ? variable.jsonPath : variable.description || '-'}
-              </div>
-              <div style={{ 
-                fontSize: '12px',
-                color: '#495057',
-                maxWidth: '100px',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap'
-              }}>
-                {'value' in variable ? 
-                  (typeof variable.value === 'object' ? 
-                    JSON.stringify(variable.value).substring(0, 20) + '...' : 
-                    String(variable.value)
-                  ) : 
-                  'Runtime'
-                }
-              </div>
-              <div style={{ textAlign: 'center' }}>
-                {variable.sourceType === 'global' && (
-                  <button
-                    onClick={() => handleDeleteVariable(variable.name)}
-                    style={{
-                      padding: '4px 8px',
-                      backgroundColor: '#dc3545',
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: '4px',
-                      fontSize: '12px',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '3px',
-                      margin: '0 auto'
-                    }}
-                    title="Delete global variable"
-                  >
-                    🗑️
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
