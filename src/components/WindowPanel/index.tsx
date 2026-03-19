@@ -37,9 +37,7 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
     const [hasExecuted, setHasExecuted] = useState<boolean>(window.type === 'javascript');
     const [isHovered, setIsHovered] = useState<boolean>(false);
     const [headerFocused, setHeaderFocused] = useState<boolean>(false);
-    const [showEditForm, setShowEditForm] = useState<boolean>(false);
-    const [editTitle, setEditTitle] = useState<string>('');
-    const [editDescription, setEditDescription] = useState<string>('');
+
     const outputRef = useRef<HTMLDivElement>(null);
     const executionRef = useRef<HTMLDivElement>(null);
     const apiPollingRef = useRef<ReturnType<typeof setInterval>[]>([]);
@@ -159,23 +157,7 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
         console.log('Template saved to Downloads folder');
     };
 
-    const editTemplate = () => {
-        setEditTitle(window.title || 'My Window');
-        setEditDescription(window.description || '');
-        setShowEditForm(true);
-    };
 
-    const saveEdit = () => {
-        onUpdate(window.id, { 
-            title: editTitle.trim() || window.title || 'My Window',
-            description: editDescription.trim()
-        });
-        setShowEditForm(false);
-    };
-
-    const cancelEdit = () => {
-        setShowEditForm(false);
-    };
 
     // Auto-execute JavaScript code when the window is first mounted or its identity changes.
     // Intentionally does NOT include window.jsCode in deps — code edits should not auto-run;
@@ -736,15 +718,12 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                                 style={{ 
                                     margin: 0, 
                                     fontSize: '14px',
-                                    cursor: 'pointer',
-                                    textDecoration: 'underline',
-                                    color: '#007bff'
+                                    cursor: 'grab',
+                                    color: '#333'
                                 }}
                                 onClick={(e) => {
-                                    e.stopPropagation();
-                                    editTemplate();
+                                    onSelect(window.id, e);
                                 }}
-                                title="Click to edit title and description"
                             >
                                 {window.title}
                             </h3>
@@ -938,83 +917,7 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                         overflow: 'auto'
                     }}
                 >
-                    {/* Edit Form */}
-                    {showEditForm && (
-                        <div style={{
-                            marginBottom: '15px',
-                            padding: '10px',
-                            backgroundColor: '#f8f9fa',
-                            border: '1px solid #dee2e6',
-                            borderRadius: '4px'
-                        }}>
-                            <h4 style={{ margin: '0 0 10px 0', fontSize: '14px' }}>Edit Window</h4>
-                            <div style={{ marginBottom: '10px' }}>
-                                <label style={{ display: 'block', fontSize: '12px', marginBottom: '5px', fontWeight: 'bold' }}>Title:</label>
-                                <input
-                                    type="text"
-                                    value={editTitle}
-                                    onChange={(e) => setEditTitle(e.target.value)}
-                                    style={{
-                                        width: '100%',
-                                        padding: '5px',
-                                        fontSize: '12px',
-                                        border: '1px solid #ced4da',
-                                        borderRadius: '3px',
-                                        boxSizing: 'border-box'
-                                    }}
-                                    placeholder="Enter window title"
-                                />
-                            </div>
-                            <div style={{ marginBottom: '15px' }}>
-                                <label style={{ display: 'block', fontSize: '12px', marginBottom: '5px', fontWeight: 'bold' }}>Description:</label>
-                                <textarea
-                                    value={editDescription}
-                                    onChange={(e) => setEditDescription(e.target.value)}
-                                    style={{
-                                        width: '100%',
-                                        height: '60px',
-                                        padding: '5px',
-                                        fontSize: '12px',
-                                        border: '1px solid #ced4da',
-                                        borderRadius: '3px',
-                                        resize: 'vertical',
-                                        boxSizing: 'border-box'
-                                    }}
-                                    placeholder="Enter window description (optional)"
-                                />
-                            </div>
-                            <div style={{ display: 'flex', gap: '8px' }}>
-                                <button
-                                    onClick={saveEdit}
-                                    style={{
-                                        padding: '6px 12px',
-                                        fontSize: '12px',
-                                        backgroundColor: '#28a745',
-                                        color: 'white',
-                                        border: 'none',
-                                        borderRadius: '3px',
-                                        cursor: 'pointer'
-                                    }}
-                                >
-                                    ✓ Save
-                                </button>
-                                <button
-                                    onClick={cancelEdit}
-                                    style={{
-                                        padding: '6px 12px',
-                                        fontSize: '12px',
-                                        backgroundColor: '#6c757d',
-                                        color: 'white',
-                                        border: 'none',
-                                        borderRadius: '3px',
-                                        cursor: 'pointer'
-                                    }}
-                                >
-                                    ✕ Cancel
-                                </button>
-                            </div>
-                        </div>
-                    )}
+
                     {window.type === 'javascript' ? (
                         <div style={{ height: '100%', width: '100%' }}>
                             {showCodeEditor ? (

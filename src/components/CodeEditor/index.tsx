@@ -441,13 +441,45 @@ const JavaScriptWindowRenderer: React.FC<{
         const apiVarNames: string[] = [];
         const apiVarValues: any[] = [];
 
-        const allParamNames = ['document', 'window', 'globalVariables', 'apiVariables', ...globalVarNames, ...apiVarNames];
-        const allParamValues = [sandboxDocument, sandboxWindow, dataConnections.globalVariables, {}, ...globalVarValues, ...apiVarValues];
+        // Build apiConnections map so user code can: await apiConnections['Name']()
+        const apiConnectionsMap: Record<string, () => Promise<any>> = {};
+        (dataConnections.apiConnections || []).filter((c: any) => c.enabled).forEach((c: any) => {
+          apiConnectionsMap[c.name] = async () => {
+            try {
+              const params = { ...(c.params || {}) };
+              let url = c.url;
+              const headers = { ...(c.headers || {}) };
+              let requestOptions: any = { method: c.method || 'GET', headers };
+              if ((c.method || 'GET') === 'GET') {
+                const qs = new URLSearchParams(params).toString();
+                if (qs) url = url + '?' + qs;
+              } else {
+                requestOptions.body = JSON.stringify(params);
+                requestOptions.headers['Content-Type'] = 'application/json';
+              }
+              const res = await fetch(url, requestOptions);
+              return await res.json();
+            } catch (e) {
+              console.error('API call failed for ' + c.name, e);
+              return null;
+            }
+          };
+        });
 
-        const func = new Function(...allParamNames, window.jsCode);
+        const allParamNames = ['document', 'window', 'globalVariables', 'apiVariables', 'apiConnections', ...globalVarNames, ...apiVarNames];
+        const allParamValues = [sandboxDocument, sandboxWindow, dataConnections.globalVariables, {}, apiConnectionsMap, ...globalVarValues, ...apiVarValues];
+
+        const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+        const func = new AsyncFunction(...allParamNames, window.jsCode);
         const result = func(...allParamValues);
 
-        if (result !== undefined && result !== null) {
+        if (result && typeof result.catch === 'function') {
+          result.catch((err: any) => {
+            if (contentRef.current) {
+              contentRef.current.innerHTML = `<div style="color: #dc3545; padding: 10px; font-family: monospace; white-space: pre-wrap; font-size: 12px;">Error: ${String(err)}</div>`;
+            }
+          });
+        } else if (result !== undefined && result !== null) {
           const resultDiv = document.createElement('div');
           resultDiv.style.cssText = 'background: #e8f5e8; border: 1px solid #4caf50; padding: 8px; margin: 5px 0; border-radius: 4px; font-family: monospace; font-size: 12px;';
           resultDiv.textContent = `Return value: ${String(result)}`;

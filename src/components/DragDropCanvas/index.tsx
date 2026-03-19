@@ -12,7 +12,7 @@ interface DragDropCanvasProps {
     onDataConnectionsChange?: (dataConnections: DataConnection) => void;
     layerStates?: LayerState[];
     onMoveWindowLayer?: (windowId: string, direction: 'up' | 'down') => void;
-    onWindowSelect?: (windowId: string) => void;
+    onWindowSelect?: (windowId: string | null) => void;
     activeLayer?: number;
 }
 
@@ -402,6 +402,7 @@ const DragDropCanvas: React.FC<DragDropCanvasProps> = ({
     const handleCanvasClick = (e: React.MouseEvent) => {
         if (e.target === e.currentTarget && !e.ctrlKey && !e.metaKey) {
             setSelectedWindows([]);
+            onWindowSelect?.(null);
         }
     };
 
@@ -717,7 +718,7 @@ const DragDropCanvas: React.FC<DragDropCanvasProps> = ({
 
                     <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '10px' }}>
                         <span style={{ fontSize: '11px', color: '#6c757d' }}>
-                            Windows: {windows.length} | Selected: {selectedWindows.length} {selectedWindows.length > 0 && `(Primary: green border)`} | Ctrl+G: Grid | Del: Delete
+                            Windows: {windows.length} | Selected: {selectedWindows.length} | Ctrl+G: Grid | Del: Delete
                         </span>
                     </div>
                 </div>
