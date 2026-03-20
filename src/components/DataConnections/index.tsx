@@ -373,7 +373,14 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
     const extractValueFromResponse = (responseData: any, jsonPath: string): any => {
         if (!jsonPath) return responseData;
         const pathParts = jsonPath.split('.');
-        return pathParts.reduce((obj: any, key: string) => obj?.[key], responseData);
+        return pathParts.reduce((obj: any, key: string) => {
+            if (obj === undefined || obj === null) return undefined;
+            // Try numeric index first so arrays work with '0', '1', etc.
+            const idx = Number(key);
+            return Number.isInteger(idx) && Array.isArray(obj)
+                ? obj[idx]
+                : obj[key];
+        }, responseData);
     };
 
     // Helper function to substitute placeholders like {{variableName}} with actual values
@@ -1556,6 +1563,10 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                         ))}
                     </div>
 
+                    {/* Two-Column Layout: Left (Configuration) | Right (Response & Variables) */}
+                    <div style={{ display: 'flex', gap: '20px', marginBottom: '15px' }}>
+                        {/* LEFT COLUMN: Configuration & JSON Body */}
+                        <div style={{ flex: '0 0 50%', display: 'flex', flexDirection: 'column' }}>
                     {/* Additional JSON Configuration */}
                     <div style={{ marginBottom: '15px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
@@ -1606,7 +1617,7 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                                     }}
                                     style={{
                                         width: '100%',
-                                        minHeight: '80px',
+                                        minHeight: '400px',
                                         padding: '8px',
                                         fontSize: '11px',
                                         border: '1px solid #ced4da',
@@ -1625,7 +1636,10 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                             </div>
                         )}
                     </div>
+                        </div>
 
+                        {/* RIGHT COLUMN: Response & Variables */}
+                        <div style={{ flex: '0 0 50%', display: 'flex', flexDirection: 'column' }}>
                     {/* Sample Response */}
                     <div style={{ marginBottom: '15px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '5px' }}>
@@ -1697,7 +1711,7 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                             onChange={(e) => handleUpdateConnection(activeConnectionData.id, { sampleResponse: e.target.value })}
                             style={{
                                 width: '100%',
-                                height: expandedResponse ? '300px' : '80px',
+                                height: '400px',
                                 padding: '6px',
                                 fontSize: '11px',
                                 fontFamily: 'monospace',
@@ -2102,10 +2116,12 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                             </div>
                         </div>
                     )}
+                        </div>
+                    </div>
                 </div>
             )}
         </div>
     );
-};
+}
 
 export default DataConnections;

@@ -41,11 +41,29 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
     const outputRef = useRef<HTMLDivElement>(null);
     const executionRef = useRef<HTMLDivElement>(null);
     const apiPollingRef = useRef<ReturnType<typeof setInterval>[]>([]);
+    // Holds the currently-registered unhandledrejection listener so it can be
+    // removed when the widget re-runs or the component unmounts.
+    const unhandledRejectionHandlerRef = useRef<((e: PromiseRejectionEvent) => void) | null>(null);
+    const uncaughtErrorHandlerRef = useRef<((e: ErrorEvent) => void) | null>(null);
     // Tracks whether this component instance is still mounted.
     // All async callbacks (Promise.then, setTimeout inside executeJavaScript) check this
     // before writing to DOM or calling onDataConnectionsChange, so that a page switch
     // can't push stale state into the app or write to a detached DOM node.
     const isMountedRef = useRef<boolean>(true);
+    // Always holds the latest dataConnections prop so async callbacks (setInterval, etc)
+    // that outlive the initial render can see newly-loaded/enabled connections.
+    const dataConnectionsRef = useRef(dataConnections);
+    useEffect(() => { dataConnectionsRef.current = dataConnections; }, [dataConnections]);
+    // ONE shared globalVariables object on globalThis so every sandbox reads/writes
+    // the same reference — cross-window updates are visible instantly without a re-render.
+    const gThis: any = globalThis;
+    if (!gThis._hmiGlobalVars) gThis._hmiGlobalVars = {};
+    Object.assign(gThis._hmiGlobalVars, dataConnections.globalVariables);
+    const sandboxGlobalVarsRef = useRef<Record<string, any>>(gThis._hmiGlobalVars);
+    useEffect(() => {
+        Object.assign(gThis._hmiGlobalVars, dataConnections.globalVariables);
+        sandboxGlobalVarsRef.current = gThis._hmiGlobalVars;
+    }, [dataConnections.globalVariables]);
     const [isEditorFullscreen, setIsEditorFullscreen] = useState<boolean>(false);
     const [isCodeEditMode, setIsCodeEditMode] = useState<boolean>(false);
     const gfWin: any = globalThis;
@@ -174,12 +192,28 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                 // Clear all polling intervals so old-page intervals don't keep firing
                 apiPollingRef.current.forEach(id => clearInterval(id));
                 apiPollingRef.current = [];
+                if (unhandledRejectionHandlerRef.current) {
+                    globalThis.removeEventListener('unhandledrejection', unhandledRejectionHandlerRef.current);
+                    unhandledRejectionHandlerRef.current = null;
+                }
+                if (uncaughtErrorHandlerRef.current) {
+                    globalThis.removeEventListener('error', uncaughtErrorHandlerRef.current);
+                    uncaughtErrorHandlerRef.current = null;
+                }
                 isMountedRef.current = false;
             };
         }
         return () => {
             apiPollingRef.current.forEach(id => clearInterval(id));
             apiPollingRef.current = [];
+            if (unhandledRejectionHandlerRef.current) {
+                globalThis.removeEventListener('unhandledrejection', unhandledRejectionHandlerRef.current);
+                unhandledRejectionHandlerRef.current = null;
+            }
+            if (uncaughtErrorHandlerRef.current) {
+                globalThis.removeEventListener('error', uncaughtErrorHandlerRef.current);
+                uncaughtErrorHandlerRef.current = null;
+            }
             isMountedRef.current = false;
         };
     }, [window.id, window.type]);
@@ -196,6 +230,15 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
         // Clear any previous cyclic polling intervals
         apiPollingRef.current.forEach(id => clearInterval(id));
         apiPollingRef.current = [];
+        // Remove any previously-registered unhandledrejection listener from a prior run
+        if (unhandledRejectionHandlerRef.current) {
+            globalThis.removeEventListener('unhandledrejection', unhandledRejectionHandlerRef.current);
+            unhandledRejectionHandlerRef.current = null;
+        }
+        if (uncaughtErrorHandlerRef.current) {
+            globalThis.removeEventListener('error', uncaughtErrorHandlerRef.current);
+            uncaughtErrorHandlerRef.current = null;
+        }
         
         // Store original console.log before execution
         const originalConsoleLog = console.log;
@@ -271,13 +314,18 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                 
                 // Function to fetch data from an API connection
                 const fetchApiData = async (connection: any) => {
+                    // Always use the live ref so stale closure doesn't read/write a detached object
+                    const liveConnections = dataConnectionsRef.current;
+                    // sandboxGlobalVarsRef.current is the most up-to-date variable store:
+                    // it receives direct sandbox writes AND is updated by every fetchApiData call.
+                    const liveVars = sandboxGlobalVarsRef.current;
                     try {
                         // Build arguments from configuration
                         const apiArgs: Record<string, any> = {};
                         connection.arguments?.forEach((arg: any) => {
                             if (arg.name && arg.value) {
                                 if (arg.type === 'variable') {
-                                    apiArgs[arg.name] = dataConnections.globalVariables[arg.value] || null;
+                                    apiArgs[arg.name] = liveVars[arg.value] || null;
                                 } else {
                                     apiArgs[arg.name] = arg.value;
                                 }
@@ -291,8 +339,15 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                         // Substitute placeholders in headers with actual global variable values
                         const substitutedHeaders: Record<string, string> = {};
                         Object.entries(connection.headers || {}).forEach(([key, value]) => {
-                            substitutedHeaders[key] = substitutePlaceholders(String(value), dataConnections.globalVariables);
+                            substitutedHeaders[key] = substitutePlaceholders(String(value), liveVars);
                         });
+                        // Debug: log any header that still contains unsubstituted {{...}} placeholders
+                        const unsubstituted = Object.entries(substitutedHeaders).filter(([, v]) => /\{\{/.test(v));
+                        if (unsubstituted.length > 0) {
+                            console.warn(`[fetchApiData:${connection.name}] Unsubstituted placeholders in headers:`, unsubstituted, '| liveVars keys:', Object.keys(liveVars));
+                        } else {
+                            console.debug(`[fetchApiData:${connection.name}] Headers OK, liveVars keys:`, Object.keys(liveVars));
+                        }
                         
                         let requestOptions: RequestInit = {
                             method: connection.method,
@@ -303,45 +358,80 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                             const queryString = new URLSearchParams(params).toString();
                             url = queryString ? url + '?' + queryString : url;
                         } else {
-                            // Start with body from connection config (e.g. batch read variable list)
-                            let bodyObj: Record<string, any> = {};
-                            if (connection.body) {
-                                try { 
-                                    // Substitute placeholders in body string before parsing
-                                    const substitutedBody = substitutePlaceholders(connection.body, dataConnections.globalVariables);
-                                    bodyObj = JSON.parse(substitutedBody); 
-                                } catch (e) {}
+                            // Mirror the exact body-building logic from the test handler:
+                            // - Array additionalConfig → send raw (e.g. Siemens S7 batch read)
+                            // - Object additionalConfig → merge args into it
+                            // - No additionalConfig → build from args only
+                            const argPayload: Record<string, any> = { ...params };
+
+                            let requestBody: string | null = null;
+                            if (connection.additionalConfig) {
+                                const substitutedBody = substitutePlaceholders(connection.additionalConfig, liveVars);
+                                try {
+                                    const parsed = JSON.parse(substitutedBody);
+                                    if (Array.isArray(parsed)) {
+                                        // Array body — send raw; named args ignored
+                                        requestBody = substitutedBody;
+                                    } else {
+                                        // Object body — merge args in (args override additionalConfig keys)
+                                        requestBody = JSON.stringify({ ...parsed, ...argPayload });
+                                    }
+                                } catch (e) {
+                                    // Not valid JSON — send raw string as-is
+                                    requestBody = substitutedBody;
+                                }
+                            } else if (Object.keys(argPayload).length > 0) {
+                                requestBody = JSON.stringify(argPayload);
                             }
-                            // Merge in any runtime params/arguments on top
-                            requestOptions.body = JSON.stringify({ ...bodyObj, ...params });
-                            requestOptions.headers = {
-                                ...requestOptions.headers,
-                                'Content-Type': 'application/json'
-                            };
+
+                            if (requestBody !== null) {
+                                requestOptions.body = requestBody;
+                                requestOptions.headers = {
+                                    ...requestOptions.headers,
+                                    // Auto-add Content-Type only if not already specified
+                                    ...(!substitutedHeaders['Content-Type'] && { 'Content-Type': 'application/json' })
+                                };
+                            }
                         }
                         
                         const response = await fetch(url, requestOptions);
                         const data = await response.json();
                         
-                        // Extract variables from response
+                        // Extract variables from response and push to React state immediately.
+                        // Write to sandboxGlobalVarsRef.current (stable, never-replaced object that
+                        // the sandbox holds a reference to) so the sandbox sees updates instantly.
+                        // Also call onDataConnectionsChange after every fetch so the DataConnections
+                        // panel and other UI always reflects current values.
+                        const updatedGlobalVariables = { ...liveVars };
+                        let anyExtracted = false;
+
                         connection.variables.forEach((variable: any) => {
                             try {
-                                let variableValue;
-                                if (variable.jsonPath) {
-                                    // Handle nested paths like 'data.value' or just 'value'
-                                    const pathParts = variable.jsonPath.split('.');
-                                    variableValue = pathParts.reduce((obj: any, key: string) => obj?.[key], data);
+                                let variableValue: any;
+                                const jp = variable.jsonPath;
+                                if (jp !== undefined && jp !== null && jp !== '') {
+                                    // Walk the path — numeric string segments index into arrays
+                                    const pathParts = String(jp).split('.');
+                                    variableValue = pathParts.reduce((obj: any, key: string) => {
+                                        if (obj === undefined || obj === null) return undefined;
+                                        // Try numeric index first so arrays work with '0', '1', etc.
+                                        const idx = Number(key);
+                                        return Number.isInteger(idx) && Array.isArray(obj)
+                                            ? obj[idx]
+                                            : obj[key];
+                                    }, data);
                                 } else {
-                                    // If no path specified, use the whole response
                                     variableValue = data;
                                 }
                                 
                                 const key = `${connection.name}_${variable.name}`;
                                 apiVariables[key] = variableValue;
                                 directApiVariables[variable.name] = variableValue;
-                                
-                                // Always add to global variables (auto-creates if doesn't exist)
+                                updatedGlobalVariables[variable.name] = variableValue;
+                                // Write into the stable sandbox object so sandbox reads it immediately
+                                sandboxGlobalVarsRef.current[variable.name] = variableValue;
                                 globalVariableUpdates[variable.name] = variableValue;
+                                anyExtracted = true;
                             } catch (e) {
                                 console.warn(`Could not extract variable ${variable.name}:`, e);
                                 const key = `${connection.name}_${variable.name}`;
@@ -349,6 +439,15 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                                 directApiVariables[variable.name] = null;
                             }
                         });
+
+                        // Push to React state so DataConnections panel and other components
+                        // see the updated values (guards: still mounted, callback exists)
+                        if (anyExtracted && isMountedRef.current && onDataConnectionsChange) {
+                            onDataConnectionsChange({
+                                ...liveConnections,
+                                globalVariables: updatedGlobalVariables
+                            });
+                        }
                         
                         return data;
                     } catch (error) {
@@ -364,30 +463,11 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                 };
                 
                 // Kick off initial API fetches immediately (fire-and-forget).
-                // We do NOT block user code on the network round-trip — the window
-                // renders at once and the polling intervals keep data fresh.
-                // apiVariables / directApiVariables / globalVariableUpdates are plain
-                // objects that fetchApiData fills by reference as each fetch resolves.
+                // Each fetchApiData call now calls onDataConnectionsChange itself,
+                // so no separate Promise.all flush is needed.
                 const enabledConnections = dataConnections.apiConnections
                     .filter((connection: any) => connection.enabled);
-                const apiPromises = enabledConnections
-                    .map((connection: any) => fetchApiData(connection));
-
-                // When the initial batch of fetches finishes, push extracted values
-                // back to React state so other parts of the UI see them.
-                // Guard: if the component unmounted while fetches were in flight, bail.
-                if (apiPromises.length > 0) {
-                    Promise.all(apiPromises).then(() => {
-                        if (!isMountedRef.current) return;
-                        if (Object.keys(globalVariableUpdates).length > 0 && onDataConnectionsChange) {
-                            const updatedGlobalVariables = { ...dataConnections.globalVariables, ...globalVariableUpdates };
-                            onDataConnectionsChange({
-                                ...dataConnections,
-                                globalVariables: updatedGlobalVariables
-                            });
-                        }
-                    });
-                }
+                enabledConnections.forEach((connection: any) => fetchApiData(connection));
 
                 // ── User code & polling run immediately, without waiting for APIs ──
                 {
@@ -485,20 +565,34 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
 
                 // Build apiConnections map so user code can call:
                 //   const data = await apiConnections['MyConnection']();
-                const apiConnectionsMap: Record<string, () => Promise<any>> = {};
-                dataConnections.apiConnections
-                    .filter((c: any) => c.enabled)
-                    .forEach((c: any) => {
-                        apiConnectionsMap[c.name] = () => fetchApiData(c);
-                    });
+                // The Proxy resolves each connection LAZILY from dataConnectionsRef.current
+                // so setInterval callbacks that fire after initial load will find connections
+                // that weren't enabled/available when the widget first ran.
+                const _proxyTarget: any = {};
+                const apiConnectionsMap = new Proxy(_proxyTarget, {
+                    get(_target: any, prop: string | symbol) {
+                        const key = typeof prop === 'symbol' ? String(prop) : prop;
+                        // skip internal JS engine checks
+                        if (key === 'then' || key === 'catch' || key === 'finally') return undefined;
+                        const live = dataConnectionsRef.current.apiConnections
+                            .find((c: any) => c.enabled && c.name === key);
+                        if (live) return () => fetchApiData(live);
+                        return () => {
+                            console.warn(`apiConnections['${key}'] is not available (connection not enabled or name mismatch).`);
+                            return Promise.resolve(null);
+                        };
+                    }
+                });
                 // Also expose on sandboxWindow so window.apiConnections works too
                 sandboxWindow['apiConnections'] = apiConnectionsMap;
 
                 // Execute the code with sandboxed environment
                 // Only pass variables whose names are valid JS identifiers as named params;
                 // others are still accessible via window.globalVariables / globalVariables.
+                // Use sandboxGlobalVarsRef.current — the stable object that fetchApiData writes to
+                // and the sandbox holds a reference to, so live mutations are always visible.
                 const isValidIdentifier = (n: string) => /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(n);
-                const globalVarEntries = Object.entries(dataConnections.globalVariables).filter(([k]) => isValidIdentifier(k));
+                const globalVarEntries = Object.entries(sandboxGlobalVarsRef.current).filter(([k]) => isValidIdentifier(k));
                 const globalVarNames = globalVarEntries.map(([k]) => k);
                 const globalVarValues = globalVarEntries.map(([, v]) => v);
                 const apiVarEntries = Object.entries(directApiVariables).filter(([k]) => isValidIdentifier(k));
@@ -507,7 +601,7 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                 
                 const allParamNames = ['document', 'window', 'process', 'globalVariables', 'apiVariables', 'apiConnections', ...globalVarNames, ...apiVarNames];
                 const sandboxProcess = { env: { NODE_ENV: 'production' } };
-                const allParamValues = [sandboxDocument, sandboxWindow, sandboxProcess, dataConnections.globalVariables, directApiVariables, apiConnectionsMap, ...globalVarValues, ...apiVarValues];
+                const allParamValues = [sandboxDocument, sandboxWindow, sandboxProcess, sandboxGlobalVarsRef.current, directApiVariables, apiConnectionsMap, ...globalVarValues, ...apiVarValues];
                 
                 // Set up error handler for async errors (event listeners, setTimeout, etc)
                 // Only catches errors that originate from the widget's DOM container
@@ -530,27 +624,104 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                 // Add error event listener to catch async errors from widget DOM
                 const outputContainer = executionRef.current;
                 outputContainer?.addEventListener('error', handleAsyncError, true);
-                
+
+                // Catch unhandled promise rejections from setInterval(async()=>{}) and similar.
+                // These never reach result.catch() because they are separate promise chains.
+                // event.preventDefault() stops the browser from treating this as a fatal error.
+                const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+                    event.preventDefault(); // suppress browser freeze / console error overlay
+                    if (!isMountedRef.current) return;
+                    const container = executionRef.current;
+                    if (!container) return;
+                    const msg = `Async Error: ${event.reason instanceof Error ? event.reason.message : String(event.reason)}`;
+                    console.warn('Widget unhandled rejection (suppressed):', msg);
+                    // Deduplicate — find existing box with same message and bump counter instead
+                    const existing = Array.from(container.querySelectorAll<HTMLElement>('[data-widget-err]'))
+                        .find(el => el.dataset.widgetErrMsg === msg);
+                    if (existing) {
+                        const n = parseInt(existing.dataset.widgetErrCount || '1', 10) + 1;
+                        existing.dataset.widgetErrCount = String(n);
+                        existing.textContent = `${msg} (×${n})`;
+                        return;
+                    }
+                    const errDiv = document.createElement('div');
+                    errDiv.style.cssText = 'background: #fff3cd; border: 1px solid #ffc107; padding: 8px; margin: 5px 0; border-radius: 4px; color: #856404; font-family: monospace; font-size: 12px;';
+                    errDiv.textContent = msg;
+                    errDiv.dataset.widgetErr = '1';
+                    errDiv.dataset.widgetErrMsg = msg;
+                    errDiv.dataset.widgetErrCount = '1';
+                    container.appendChild(errDiv);
+                };
+                globalThis.addEventListener('unhandledrejection', handleUnhandledRejection);
+                unhandledRejectionHandlerRef.current = handleUnhandledRejection;
+
+                // Catch synchronous errors thrown inside setInterval(()=>{}) / setTimeout(()=>{})
+                // (non-async callbacks — these become global ErrorEvents, not promise rejections)
+                const handleUncaughtError = (event: ErrorEvent) => {
+                    event.preventDefault(); // suppress browser freeze
+                    if (!isMountedRef.current) return;
+                    const container = executionRef.current;
+                    if (!container) return;
+                    const msg = `Error: ${event.message || String(event)}`;
+                    console.warn('Widget uncaught error (suppressed):', msg);
+                    // Deduplicate
+                    const existing = Array.from(container.querySelectorAll<HTMLElement>('[data-widget-err]'))
+                        .find(el => el.dataset.widgetErrMsg === msg);
+                    if (existing) {
+                        const n = parseInt(existing.dataset.widgetErrCount || '1', 10) + 1;
+                        existing.dataset.widgetErrCount = String(n);
+                        existing.textContent = `${msg} (×${n})`;
+                        return;
+                    }
+                    const errDiv = document.createElement('div');
+                    errDiv.style.cssText = 'background: #f8d7da; border: 1px solid #f5c6cb; padding: 8px; margin: 5px 0; border-radius: 4px; color: #721c24; font-family: monospace; font-size: 12px;';
+                    errDiv.textContent = msg;
+                    errDiv.dataset.widgetErr = '1';
+                    errDiv.dataset.widgetErrMsg = msg;
+                    errDiv.dataset.widgetErrCount = '1';
+                    container.appendChild(errDiv);
+                };
+                globalThis.addEventListener('error', handleUncaughtError);
+                uncaughtErrorHandlerRef.current = handleUncaughtError;
+
                 let result: any = undefined;
                 try {
                     // Use AsyncFunction so `await` works anywhere in user code
                     const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-                    const func = new AsyncFunction(...allParamNames, window.jsCode || '');
+                    
+                    // Wrap user code in try/catch to prevent page freeze
+                    // This catches errors in setInterval, setTimeout, promises, etc.
+                    const wrappedCode = `
+try {
+${window.jsCode || ''}
+} catch (e) {
+    console.error('User code error:', e);
+    throw e;
+}
+`;
+                    const func = new AsyncFunction(...allParamNames, wrappedCode);
                     result = func(...allParamValues);
                     // Attach a .catch so unhandled async errors show up in the widget
                     if (result && typeof result.then === 'function') {
                         result.catch((asyncErr: any) => {
+                            if (!isMountedRef.current) return; // component unmounted — don't touch DOM
+                            const container = executionRef.current;
+                            if (!container) return;
                             const msg = `Error: ${asyncErr instanceof Error ? asyncErr.message : String(asyncErr)}`;
                             const errDiv = document.createElement('div');
                             errDiv.style.cssText = 'background: #f8d7da; border: 1px solid #f5c6cb; padding: 8px; margin: 5px 0; border-radius: 4px; color: #721c24; font-family: monospace; font-size: 12px;';
                             errDiv.textContent = msg;
-                            executionRef.current?.appendChild(errDiv);
+                            container.appendChild(errDiv);
                         });
                         result = undefined; // Don't display "Return value: [object Promise]"
                     }
                 } catch (execError) {
                     // Clean up error handlers
                     outputContainer?.removeEventListener('error', handleAsyncError, true);
+                    globalThis.removeEventListener('unhandledrejection', handleUnhandledRejection);
+                    unhandledRejectionHandlerRef.current = null;
+                    globalThis.removeEventListener('error', handleUncaughtError);
+                    uncaughtErrorHandlerRef.current = null;
                     
                     // Display error in container WITHOUT re-throwing
                     const errorMessage = `Error: ${execError instanceof Error ? execError.message : String(execError)}`;
@@ -573,15 +744,32 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                 
                 // Clean up error handlers after successful execution
                 outputContainer?.removeEventListener('error', handleAsyncError, true);
+                // NOTE: handleUnhandledRejection stays registered for the lifetime of this widget
+                // so that setInterval/setTimeout async errors are caught even after the outer function returns.
 
                 // Set up automatic re-fetching for ALL enabled API connections
                 // Uses the connection's configured interval, or 5000ms as default
+                // Important: Look up connection by NAME on each tick, not by captured reference,
+                // so that connection config changes (enable/disable, interval change, URL change) are reflected in real-time
                 dataConnections.apiConnections
                     .filter((connection: any) => connection.enabled && connection.trigger?.type !== 'manual')
                     .forEach((connection: any) => {
+                        const connectionName = connection.name;
                         const interval = connection.trigger?.interval > 0 ? connection.trigger.interval : 5000;
                         const intervalId = setInterval(() => {
-                            fetchApiData(connection).catch(() => {});
+                            try {
+                                // Always look up the freshest connection config by name from the live ref
+                                const liveConnection = dataConnectionsRef.current.apiConnections?.find(
+                                    (c: any) => c && c.name === connectionName
+                                );
+                                // Only fetch if the connection is still enabled
+                                if (liveConnection && liveConnection.enabled) {
+                                    fetchApiData(liveConnection).catch(() => {});
+                                }
+                            } catch (e) {
+                                // Silently catch any polling errors
+                                console.error(`Polling error for connection "${connectionName}":`, e);
+                            }
                         }, interval);
                         apiPollingRef.current.push(intervalId);
                     });
