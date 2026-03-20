@@ -159,9 +159,13 @@ export const generateCode = (
 </head>
 <body>
     <script>
-        // Global API functions and variables
+        if(typeof process==='undefined'){window.process={env:{NODE_ENV:'production'},browser:true,version:'',versions:{}}}
+        // Shared live globalVariables — _hmiGlobalVars and globalVariables are the SAME object reference
+        // so any API call that writes a token/value is immediately visible to all subsequent calls
+        if (!window._hmiGlobalVars) window._hmiGlobalVars = {};
+        Object.assign(window._hmiGlobalVars, ${JSON.stringify(dataConnections?.globalVariables || {})});
+        window.globalVariables = window._hmiGlobalVars;
         window.apiData = {};
-        window.globalVariables = ${JSON.stringify(dataConnections?.globalVariables || {})};
         
         // Helper: substitute {{varName}} placeholders with actual global variable values
         window.substitutePlaceholders = function(str) {
@@ -209,10 +213,11 @@ export const generateCode = (
             try {
                 // Build arguments from configuration
                 const apiArgs = {};
+                var _liveVarsArgs = window._hmiGlobalVars || window.globalVariables || {};
                 ${api.arguments.map(arg => `
                 if ('${arg.name}' && '${arg.value}') {
                     apiArgs['${arg.name}'] = ${arg.type === 'variable' ? 
-                        `window['${arg.value}'] || window.globalVariables['${arg.value}'] || null` : 
+                        `_liveVarsArgs['${arg.value}'] !== undefined ? _liveVarsArgs['${arg.value}'] : null` : 
                         `'${arg.value}'`};
                 }`).join('')}
                 
@@ -221,14 +226,26 @@ export const generateCode = (
                 
                 // Build URL with arguments
                 let url = '${api.url}';
-                const params = Object.assign(${JSON.stringify(api.params)}, finalArgs);
                 
-                // Substitute {{variableName}} placeholders in headers with actual global variable values
+                // Substitute {{variableName}} placeholders in params — always use _hmiGlobalVars (live)
+                var _liveVars = window._hmiGlobalVars || window.globalVariables || {};
+                var _rawParams = ${JSON.stringify(api.params)};
+                const substitutedParams = {};
+                Object.keys(_rawParams).forEach(function(key) {
+                    var val = String(_rawParams[key]);
+                    substitutedParams[key] = val.replace(/\{\{(\w+)\}\}/g, function(match, varName) {
+                        var varVal = _liveVars[varName];
+                        return (varVal !== undefined && varVal !== null) ? String(varVal) : match;
+                    });
+                });
+                const params = Object.assign(substitutedParams, finalArgs);
+                
+                // Substitute {{variableName}} placeholders in headers — always use _hmiGlobalVars (live)
                 const rawHeaders = ${JSON.stringify(api.headers)};
                 const substitutedHeaders = {};
                 Object.keys(rawHeaders).forEach(function(key) {
                     substitutedHeaders[key] = String(rawHeaders[key]).replace(/\{\{(\w+)\}\}/g, function(match, varName) {
-                        const val = (window.globalVariables && window.globalVariables[varName] !== undefined) ? window.globalVariables[varName] : window[varName];
+                        var val = _liveVars[varName];
                         return (val !== undefined && val !== null) ? String(val) : match;
                     });
                 });
@@ -242,41 +259,57 @@ export const generateCode = (
                     const queryString = new URLSearchParams(params).toString();
                     url = queryString ? url + '?' + queryString : url;
                 } else {
-                    // For POST/PUT/PATCH, build body with additional config merged in
-                    let requestBody = Object.assign({}, params);
+                    // Mirror fetchApiData body logic: array additionalConfig → send raw, object → merge with params
+                    var _requestBody = null;
                     ${api.additionalConfig ? `
-                    // Merge additional JSON configuration into body (with placeholder substitution)
                     try {
-                        var rawAdditionalConfig = ${api.additionalConfig};
-                        var additionalConfig = window.substituteInObject ? window.substituteInObject(rawAdditionalConfig) : rawAdditionalConfig;
-                        if (additionalConfig && typeof additionalConfig === 'object') {
-                            // Merge additional config directly into request body
-                            Object.assign(requestBody, additionalConfig);
+                        // Substitute {{varName}} FIRST (before JSON.parse) — placeholders like "value": {{num}}
+                        // are valid after substitution but are not valid JSON before it.
+                        var _acRaw = ${JSON.stringify(api.additionalConfig)};
+                        var _gv = window._hmiGlobalVars || window.globalVariables || {}; // always live
+                        var _acSubstituted = _acRaw.replace(/\{\{(\w+)\}\}/g, function(m, k) {
+                            var v = _gv[k];
+                            return (v !== undefined && v !== null) ? String(v) : m;
+                        });
+                        var _ac = JSON.parse(_acSubstituted);
+                        if (Array.isArray(_ac)) {
+                            _requestBody = JSON.stringify(_ac);
+                        } else {
+                            _requestBody = JSON.stringify(Object.assign({}, _ac, params));
                         }
-                    } catch (e) {
-                        console.warn('Failed to parse additional config:', e);
-                    }
+                    } catch(e) { console.warn('additionalConfig parse failed', e); }
                     ` : ''}
-                    requestOptions.body = JSON.stringify(requestBody);
-                    requestOptions.headers['Content-Type'] = 'application/json';
+                    if (_requestBody === null && Object.keys(params).length > 0) {
+                        _requestBody = JSON.stringify(params);
+                    }
+                    if (_requestBody !== null) {
+                        requestOptions.body = _requestBody;
+                        if (!substitutedHeaders['Content-Type']) {
+                            requestOptions.headers['Content-Type'] = 'application/json';
+                        }
+                    }
                 }
                 
                 const response = await fetch(url, requestOptions);
                 const data = await response.json();
                 window.apiData['${api.name}'] = data;
                 
-                // Extract variables
-                ${api.variables.map(variable => `
+                // Extract variables using safe path traversal (handles numeric segments like '0.result')
+                ${api.variables.map((variable: any) => `
                 try {
-                    const variableValue = ${variable.jsonPath.includes('[') ? 
-                        `data.${variable.jsonPath}` : 
-                        `data${variable.jsonPath ? '.' + variable.jsonPath : ''}`};
-                    window.${variable.name} = variableValue;
+                    var _pathParts = ${JSON.stringify(variable.jsonPath ? String(variable.jsonPath).split('.') : [])};
+                    var variableValue = _pathParts.length === 0 ? data : _pathParts.reduce(function(obj, key) {
+                        if (obj === undefined || obj === null) return undefined;
+                        var idx = Number(key);
+                        return (Number.isInteger(idx) && Array.isArray(obj)) ? obj[idx] : obj[key];
+                    }, data);
+                    window['${variable.name}'] = variableValue;
                     window.globalVariables['${variable.name}'] = variableValue;
+                    if (window._hmiGlobalVars) window._hmiGlobalVars['${variable.name}'] = variableValue;
                     window.apiVariables['${api.name}_${variable.name}'] = variableValue;
                 } catch (e) {
                     console.warn('Could not extract variable ${variable.name}:', e);
-                    window.${variable.name} = null;
+                    window['${variable.name}'] = null;
                     window.apiVariables['${api.name}_${variable.name}'] = null;
                 }`).join('')}
                 
@@ -330,9 +363,9 @@ export const generateCode = (
             }`).join('')}
         };
         
-        // Start initial API calls for cyclic triggers and populate all variables on load
+        // Start initial API calls — only for non-manual triggers (cyclic/conditional need an initial fetch to populate variables)
         setTimeout(() => {
-            ${(dataConnections?.apiConnections || []).filter(api => api.enabled).map(api => `
+            ${(dataConnections?.apiConnections || []).filter(api => api.enabled && api.trigger.type !== 'manual').map(api => `
             window.fetch${api.name.replace(/[^a-zA-Z0-9]/g, '')}();`).join('')}
         }, 1000);
     </script>
@@ -468,12 +501,23 @@ export const generateCode = (
                         var _globalVarValues = _globalVarNames.map(function(k) { return _globalVars[k]; });
                         var _apiVarNames = Object.keys(_apiVars).filter(_isValidId);
                         var _apiVarValues = _apiVarNames.map(function(k) { return _apiVars[k]; });
-                        // Build apiConnections map so user code can: await apiConnections['Name']()
-                        var _apiConnectionsMap = {};
+                        // Build apiConnections map — deferred lookup so fetch functions are found even if
+                        // the global script partially failed; Proxy returns no-op for unknown names.
+                        var _apiConnectionsBase = {};
                         ${JSON.stringify((dataConnections?.apiConnections || []).filter((a: any) => a.enabled).map((a: any) => a.name))}.forEach(function(name) {
                             var fnName = 'fetch' + name.replace(/[^a-zA-Z0-9]/g, '');
-                            if (typeof window[fnName] === 'function') {
-                                _apiConnectionsMap[name] = function() { return window[fnName](); };
+                            // Register unconditionally — check existence at call-time, not build-time
+                            _apiConnectionsBase[name] = function() {
+                                return typeof window[fnName] === 'function'
+                                    ? window[fnName]()
+                                    : Promise.resolve(null);
+                            };
+                        });
+                        var _apiConnectionsMap = new Proxy(_apiConnectionsBase, {
+                            get: function(t, prop) {
+                                var key = typeof prop === 'symbol' ? String(prop) : prop;
+                                if (key === 'then' || key === 'catch' || key === 'finally') return undefined;
+                                return t[key] || function() { console.warn("apiConnections['" + key + "'] not available"); return Promise.resolve(null); };
                             }
                         });
                         var _allParamNames = ['document', 'window', 'globalVariables', 'apiVariables', 'apiConnections'].concat(_globalVarNames).concat(_apiVarNames);

@@ -49,6 +49,13 @@ const App: React.FC = () => {
   const panelDragRef = useRef<{ panel: 'left' | 'layers' | 'export'; startX: number; startWidth: number } | null>(null);
   const [isDraggingPanel, setIsDraggingPanel] = useState<boolean>(false);
 
+  // Undo/Redo for window moves and resizes
+  const [windowHistory, setWindowHistory] = useState<WindowPanel[][]>([]);
+  const [historyIndex, setHistoryIndex] = useState<number>(-1);
+  const isDraggingWindowRef = useRef<boolean>(false);
+  const lastSavedWindowsRef = useRef<WindowPanel[] | null>(null);
+  const windowChangeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
   const handlePanelDragStart = (panel: 'left' | 'layers' | 'export', e: React.MouseEvent) => {
     e.preventDefault();
     const startWidth = panel === 'left' ? leftPanelWidth : panel === 'layers' ? layersWidth : exportWidth;
@@ -77,6 +84,15 @@ const App: React.FC = () => {
     return () => {
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
+    };
+  }, []);
+
+  // Cleanup for window change timeout
+  useEffect(() => {
+    return () => {
+      if (windowChangeTimeoutRef.current) {
+        clearTimeout(windowChangeTimeoutRef.current);
+      }
     };
   }, []);
 
@@ -299,6 +315,49 @@ const App: React.FC = () => {
     );
   };
 
+  // Undo/Redo helper functions
+  const getActivePage = () => builderPages.find(p => p.id === activeBuilderPageId);
+
+  const saveToHistory = (windows: WindowPanel[]) => {
+    // Remove any future history if we're not at the end
+    const newHistory = windowHistory.slice(0, historyIndex + 1);
+    newHistory.push(windows);
+    setWindowHistory(newHistory);
+    setHistoryIndex(newHistory.length - 1);
+  };
+
+  const handleUndo = () => {
+    if (historyIndex > 0) {
+      const previous = windowHistory[historyIndex - 1];
+      setBuilderPages(prev =>
+        prev.map(page =>
+          page.id === activeBuilderPageId
+            ? { ...page, windows: previous }
+            : page
+        )
+      );
+      setHistoryIndex(historyIndex - 1);
+    }
+  };
+
+  // Keyboard listener for Ctrl+Z
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        handleUndo();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [historyIndex, windowHistory]);
+
+  // Lifecycle: Reset history when active page changes
+  useEffect(() => {
+    setWindowHistory([]);
+    setHistoryIndex(-1);
+  }, [activeBuilderPageId]);
+
   const handleAddTemplate = (type: 'javascript' | 'html' | 'visualization', template: any) => {
     const newWindow: WindowPanel = {
       id: `window-${Date.now()}`,
@@ -318,7 +377,37 @@ const App: React.FC = () => {
   };
 
   const handleWindowsChange = (newWindows: WindowPanel[]) => {
+    // If not already dragging and windows changed, mark as dragging and save the starting state
+    if (!isDraggingWindowRef.current) {
+      const activePage = getActivePage();
+      if (activePage && JSON.stringify(activePage.windows) !== JSON.stringify(newWindows)) {
+        isDraggingWindowRef.current = true;
+        lastSavedWindowsRef.current = activePage.windows;
+      }
+    }
+
+    // Always update the windows immediately for smooth UI
     setWindows(newWindows);
+
+    // Schedule saving to history after a short delay (to batch multiple updates from continuous drag)
+    if (isDraggingWindowRef.current) {
+      // Clear any pending save
+      if (windowChangeTimeoutRef.current) {
+        clearTimeout(windowChangeTimeoutRef.current);
+      }
+
+      // Set a new timeout to save after drag finishes
+      windowChangeTimeoutRef.current = setTimeout(() => {
+        const activePage = getActivePage();
+        if (activePage && lastSavedWindowsRef.current && 
+            JSON.stringify(lastSavedWindowsRef.current) !== JSON.stringify(activePage.windows)) {
+          // Save to history only if windows actually changed
+          saveToHistory(activePage.windows);
+        }
+        isDraggingWindowRef.current = false;
+        lastSavedWindowsRef.current = null;
+      }, 200); // Wait 200ms after last change before committing to history
+    }
   };
 
   // Layer management functions
@@ -604,7 +693,11 @@ const App: React.FC = () => {
                   <span style={{ fontSize: '12px' }}>◀</span>
                 </div>
                 <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
-                  <VisualizationLibrary onAddTemplate={handleAddTemplate} />
+                  <VisualizationLibrary 
+                    onAddTemplate={handleAddTemplate}
+                    globalVariables={dataConnections.globalVariables}
+                    onUpdateGlobalVariables={(vars) => setDataConnections(prev => ({ ...prev, globalVariables: vars }))}
+                  />
                 </div>
                 {/* Drag resize handle */}
                 <div

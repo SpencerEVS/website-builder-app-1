@@ -437,8 +437,21 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                                 const key = `${connection.name}_${variable.name}`;
                                 apiVariables[key] = null;
                                 directApiVariables[variable.name] = null;
+                                // Mark as failure if variable extraction fails
+                                if (connection.failureVariable) {
+                                    updatedGlobalVariables[connection.failureVariable] = false;
+                                    sandboxGlobalVarsRef.current[connection.failureVariable] = false;
+                                    globalVariableUpdates[connection.failureVariable] = false;
+                                }
                             }
                         });
+
+                        // Set failure variable to true on successful API call
+                        if (connection.failureVariable) {
+                            updatedGlobalVariables[connection.failureVariable] = true;
+                            sandboxGlobalVarsRef.current[connection.failureVariable] = true;
+                            globalVariableUpdates[connection.failureVariable] = true;
+                        }
 
                         // Push to React state so DataConnections panel and other components
                         // see the updated values (guards: still mounted, callback exists)
@@ -452,6 +465,11 @@ const WindowPanel: React.FC<WindowPanelProps> = ({
                         return data;
                     } catch (error) {
                         console.error(`API call failed for ${connection.name}:`, error);
+                        // Set failure variable to false on error
+                        if (connection.failureVariable) {
+                            sandboxGlobalVarsRef.current[connection.failureVariable] = false;
+                            globalVariableUpdates[connection.failureVariable] = false;
+                        }
                         // Set variables to null on error
                         connection.variables.forEach((variable: any) => {
                             const key = `${connection.name}_${variable.name}`;
@@ -1134,26 +1152,6 @@ ${window.jsCode || ''}
                                             cursor: 'text'
                                         }}
                                     />
-                                    <button
-                                        onMouseDown={(e) => e.stopPropagation()}
-                                        onClick={(e) => { e.stopPropagation(); setIsEditorFullscreen(true); }}
-                                        title="Expand editor"
-                                        style={{
-                                            position: 'absolute',
-                                            bottom: '6px',
-                                            right: '6px',
-                                            padding: '2px 7px',
-                                            fontSize: '11px',
-                                            backgroundColor: '#ffffff',
-                                            color: '#495057',
-                                            border: '1px solid #ced4da',
-                                            borderRadius: '3px',
-                                            cursor: 'pointer',
-                                            zIndex: 2
-                                        }}
-                                    >
-                                        &#x26F6; Expand
-                                    </button>
                                 </div>
                             ) : (
                                 <div 
@@ -1205,6 +1203,10 @@ ${window.jsCode || ''}
                                 srcDoc={`<!DOCTYPE html>
 <html>
 <head>
+<script>
+// Make globalVariables available to HTML templates
+window.globalVariables = ${JSON.stringify(dataConnections?.globalVariables || {})};
+</script>
 <style>
   * { margin: 0; padding: 0; }
   html, body { 

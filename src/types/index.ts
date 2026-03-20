@@ -85,6 +85,7 @@ export interface ApiConnection {
     variables: ApiVariable[];
     enabled: boolean;
     additionalConfig?: string; // Additional JSON configuration
+    failureVariable?: string; // Global variable to track API call failures (true = success, false = failure)
 }
 
 export interface ApiVariable {

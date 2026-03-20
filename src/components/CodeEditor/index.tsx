@@ -208,21 +208,6 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
           justifyContent: 'space-between'
         }}>
           <span>Code Editor</span>
-          {selectedWindowData && (
-            <button
-              onClick={() => setIsEditorFullscreen(true)}
-              title="Expand editor"
-              style={{
-                padding: '2px 7px',
-                fontSize: '11px',
-                backgroundColor: '#ffffff',
-                color: '#495057',
-                border: '1px solid #ced4da',
-                borderRadius: '3px',
-                cursor: 'pointer'
-              }}
-            >&#x26F6; Expand</button>
-          )}
         </div>
         
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>

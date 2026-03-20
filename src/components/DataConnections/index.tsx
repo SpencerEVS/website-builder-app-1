@@ -1967,6 +1967,30 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                         </div>
                     )}
 
+                    {/* Failure Variable Configuration */}
+                    <div style={{ marginBottom: '15px', padding: '12px', backgroundColor: '#fff3cd', border: '1px solid #ffc107', borderRadius: '3px' }}>
+                        <label style={{ display: 'block', fontSize: '12px', fontWeight: 'bold', marginBottom: '6px' }}>
+                            ⚠️ Failure Tracking Variable:
+                        </label>
+                        <input
+                            type="text"
+                            placeholder="e.g., apiCallSuccess"
+                            value={activeConnectionData.failureVariable || ''}
+                            onChange={(e) => handleUpdateConnection(activeConnectionData.id, { failureVariable: e.target.value || undefined })}
+                            style={{
+                                width: '100%',
+                                padding: '6px',
+                                fontSize: '11px',
+                                border: '1px solid #ffc107',
+                                borderRadius: '3px',
+                                marginBottom: '4px'
+                            }}
+                        />
+                        <div style={{ fontSize: '10px', color: '#856404', lineHeight: '1.4' }}>
+                            💡 Set a global variable name to track call status: <strong>true</strong> when successful, <strong>false</strong> on API or write failure. If empty, no tracking.
+                        </div>
+                    </div>
+
                     {/* Variables */}
                     <div style={{ marginBottom: '15px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
