@@ -1119,7 +1119,7 @@ ${window.jsCode || ''}
                     className="window-content"
                     style={{
                         flex: 1,
-                        padding: (window.type === 'visualization' || window.type === 'html') ? '0' : '8px',
+                        padding: '0',
                         overflow: 'auto'
                     }}
                 >
@@ -1144,7 +1144,7 @@ ${window.jsCode || ''}
                                             backgroundColor: '#ffffff',
                                             color: '#212529',
                                             border: '1px solid #80bdff',
-                                            padding: '8px',
+                                            padding: '0',
                                             resize: 'none',
                                             boxSizing: 'border-box',
                                             outline: 'none',
@@ -1183,7 +1183,7 @@ ${window.jsCode || ''}
                                         fontFamily: 'Monaco, Consolas, monospace',
                                         fontSize: '12px',
                                         border: '1px solid #ddd',
-                                        padding: '8px',
+                                        padding: '0',
                                         resize: 'none',
                                         marginBottom: '8px'
                                     }}
