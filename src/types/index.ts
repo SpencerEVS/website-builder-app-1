@@ -86,6 +86,7 @@ export interface ApiConnection {
     enabled: boolean;
     additionalConfig?: string; // Additional JSON configuration
     failureVariable?: string; // Global variable to track API call failures (true = success, false = failure)
+    useProxy?: boolean; // Whether to use CORS proxy for this connection
 }
 
 export interface ApiVariable {

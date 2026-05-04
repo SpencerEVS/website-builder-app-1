@@ -208,7 +208,8 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
             },
             sampleResponse: '',
             variables: [],
-            enabled: true
+            enabled: true,
+            useProxy: false
         };
 
         console.log('Current dataConnections:', dataConnections);
@@ -446,9 +447,12 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
         const substitutedHeaders: Record<string, string> = {};
 
         try {
-            // Add URL parameters
+            // Add URL parameters - substitute placeholders first
             Object.entries(connection.params).forEach(([key, value]) => {
-                if (value) urlParams.append(key, value);
+                if (value) {
+                    const substitutedValue = substitutePlaceholders(String(value), liveGlobalVarsRef.current);
+                    urlParams.append(key, substitutedValue);
+                }
             });
 
             // Add arguments as query parameters for GET requests or prepare body for POST/PUT
@@ -512,17 +516,37 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                 substitutedHeaders[key] = substitutePlaceholders(String(value), liveGlobalVarsRef.current);
             });
 
-            const response = await fetch(url, {
-                method: connection.method,
+            // Apply CORS proxy if enabled
+            let finalUrl = url;
+            let finalHeaders = substitutedHeaders;
+            if (connection.useProxy && connection.method === 'GET') {
+                // Use allorigins raw endpoint - returns response directly without wrapper
+                finalUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url);
+                finalHeaders = { 'Accept': 'application/json' };
+                console.log('Using CORS proxy for URL:', url);
+            } else if (connection.useProxy && connection.method !== 'GET') {
+                // For POST/PUT, use cors-anywhere
+                finalUrl = 'https://cors-anywhere.herokuapp.com/' + url;
+                console.log('Using CORS proxy for POST/PUT:', url);
+            }
+
+            console.log('Final Request URL:', finalUrl);
+            console.log('Using Proxy:', connection.useProxy);
+
+            const response = await fetch(finalUrl, {
+                method: connection.useProxy && connection.method === 'GET' ? 'GET' : connection.method,
                 headers: {
-                    ...substitutedHeaders,
+                    ...finalHeaders,
                     // Auto-add Content-Type if not already specified and we have a body
-                    ...(requestBody && !substitutedHeaders['Content-Type'] && { 'Content-Type': 'application/json' })
+                    ...(requestBody && !finalHeaders['Content-Type'] && { 'Content-Type': 'application/json' })
                 },
                 body: requestBody
             });
 
-            const responseText = await response.text();
+            let responseText = await response.text();
+
+            // Raw endpoint returns response directly, no unwrapping needed
+
             let responseData: any;
             
             try {
@@ -934,7 +958,8 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                                                 sampleResponse: template.sampleResponse,
                                                 // @ts-ignore
                                                 variables: template.variables.map(variable => ({ ...variable, id: `var-${Date.now()}-${Math.random()}` })),
-                                                enabled: true
+                                                enabled: true,
+                                                useProxy: false
                                             };
                                             
                                             onDataConnectionsChange({
@@ -1071,6 +1096,10 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                         Configure: {activeConnectionData.name}
                     </h4>
 
+                    {/* Two-Column Layout: Left (Configuration) | Right (Response & Variables) */}
+                    <div style={{ display: 'flex', gap: '20px', marginBottom: '15px' }}>
+                        {/* LEFT COLUMN: Configuration & JSON Body */}
+                        <div style={{ flex: '0 0 50%', display: 'flex', flexDirection: 'column' }}>
                     {/* API Configuration */}
                     <div style={{ marginBottom: '15px' }}>
                         <label style={{ display: 'block', fontSize: '12px', fontWeight: 'bold', marginBottom: '5px' }}>
@@ -1124,6 +1153,21 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                             />
                             Enable Connection
                         </label>
+                    </div>
+
+                    {/* Use CORS Proxy */}
+                    <div style={{ marginBottom: '15px' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', fontWeight: 'bold' }}>
+                            <input
+                                type="checkbox"
+                                checked={activeConnectionData.useProxy || false}
+                                onChange={(e) => handleUpdateConnection(activeConnectionData.id, { useProxy: e.target.checked })}
+                            />
+                            Use CORS Proxy
+                        </label>
+                        <div style={{ marginTop: '4px', fontSize: '11px', color: '#6c757d' }}>
+                            Enable this for external APIs that block direct browser requests
+                        </div>
                     </div>
 
                     {/* Trigger Configuration */}
@@ -1447,7 +1491,105 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                         ))}
                     </div>
 
-                    {/* Body Params Section */}
+                    {/* Query Strings Section */}
+                    <div style={{ marginBottom: '15px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                            <label style={{ fontSize: '12px', fontWeight: 'bold' }}>
+                                Query Strings:
+                                <span style={{ fontWeight: 'normal', fontSize: '10px', color: '#666', marginLeft: '4px' }}>
+                                    (converts to: ?key1=value1&key2=value2)
+                                </span>
+                            </label>
+                            <button
+                                onClick={() => {
+                                    const newParams = { ...activeConnectionData.params };
+                                    newParams[`param_${Date.now()}`] = '';
+                                    handleUpdateConnection(activeConnectionData.id, { params: newParams });
+                                }}
+                                style={{
+                                    padding: '2px 6px',
+                                    fontSize: '10px',
+                                    backgroundColor: '#28a745',
+                                    color: 'white',
+                                    border: 'none',
+                                    borderRadius: '2px',
+                                    cursor: 'pointer'
+                                }}
+                            >
+                                + Add Query String
+                            </button>
+                        </div>
+
+                        {Object.entries(activeConnectionData.params).map(([key, value], index) => (
+                            <div key={index} style={{
+                                padding: '8px',
+                                backgroundColor: '#f8f9fa',
+                                borderRadius: '4px',
+                                marginBottom: '5px',
+                                border: '1px solid #dee2e6'
+                            }}>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 20px', gap: '5px', alignItems: 'center' }}>
+                                    <input
+                                        type="text"
+                                        placeholder="Query key"
+                                        value={key}
+                                        onChange={(e) => {
+                                            const newParams = { ...activeConnectionData.params };
+                                            const oldKey = key;
+                                            delete newParams[oldKey];
+                                            newParams[e.target.value] = value;
+                                            handleUpdateConnection(activeConnectionData.id, { params: newParams });
+                                        }}
+                                        style={{
+                                            padding: '4px',
+                                            fontSize: '11px',
+                                            border: '1px solid #ced4da',
+                                            borderRadius: '3px'
+                                        }}
+                                    />
+                                    <input
+                                        type="text"
+                                        placeholder="Query value"
+                                        value={value}
+                                        onChange={(e) => {
+                                            const newParams = { ...activeConnectionData.params };
+                                            newParams[key] = e.target.value;
+                                            handleUpdateConnection(activeConnectionData.id, { params: newParams });
+                                        }}
+                                        style={{
+                                            padding: '4px',
+                                            fontSize: '11px',
+                                            border: '1px solid #ced4da',
+                                            borderRadius: '3px'
+                                        }}
+                                    />
+                                    <button
+                                        onClick={() => {
+                                            const newParams = { ...activeConnectionData.params };
+                                            delete newParams[key];
+                                            handleUpdateConnection(activeConnectionData.id, { params: newParams });
+                                        }}
+                                        style={{
+                                            padding: '2px',
+                                            fontSize: '10px',
+                                            backgroundColor: '#dc3545',
+                                            color: 'white',
+                                            border: 'none',
+                                            borderRadius: '2px',
+                                            cursor: 'pointer',
+                                            width: '20px',
+                                            height: '20px'
+                                        }}
+                                        title="Delete query string"
+                                    >
+                                        ×
+                                    </button>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* Body Parameters Section */}
                     <div style={{ marginBottom: '15px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                             <label style={{ fontSize: '12px', fontWeight: 'bold' }}>
@@ -1562,11 +1704,6 @@ const DataConnections: React.FC<DataConnectionsProps> = ({
                             </div>
                         ))}
                     </div>
-
-                    {/* Two-Column Layout: Left (Configuration) | Right (Response & Variables) */}
-                    <div style={{ display: 'flex', gap: '20px', marginBottom: '15px' }}>
-                        {/* LEFT COLUMN: Configuration & JSON Body */}
-                        <div style={{ flex: '0 0 50%', display: 'flex', flexDirection: 'column' }}>
                     {/* Additional JSON Configuration */}
                     <div style={{ marginBottom: '15px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
